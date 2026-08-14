@@ -15,6 +15,8 @@ import sys
 import time
 from typing import Iterable
 
+from omegaconf import OmegaConf
+
 from simfoundry import configure_omnigibson_data_path
 from simfoundry.pipeline.reporting import write_pipeline_report
 from simfoundry.pipeline.resource_scheduler import query_gpu_memory_used_gb
@@ -272,6 +274,50 @@ def select_stages(
     return out
 
 
+def filter_previously_successful(specs: list[StageSpec], extra_overrides: list[str]) -> list[StageSpec]:
+    """Drop stages whose stage_info.json records success=true (--skip-successful).
+
+    "Successful" means the stage completed once for this scene, not that its outputs
+    are up to date: markers carry no upstream awareness, so re-running an earlier
+    stage with new settings does not invalidate downstream markers.
+    """
+    cfg = OmegaConf.load(DEFAULT_CFG_PATH)
+    dotlist = [item for item in extra_overrides if "=" in item and not item.startswith(("+", "~", "hydra"))]
+    if dotlist:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(dotlist))
+
+    kept: list[StageSpec] = []
+    for spec in specs:
+        cfg_key = spec.cfg_key
+        if cfg_key == "s2_depth":
+            # Stage 2 is a backend selector; its stage_info.json lands under the
+            # selected backend's own dir (see 2_run_depth.py).
+            backend = OmegaConf.select(cfg, "s2_depth.backend", default="da3")
+            cfg_key = "s2_fs" if backend == "fs" else "s2_da"
+        try:
+            out_dir = OmegaConf.select(cfg, f"{cfg_key}.out_dir")
+        except Exception:
+            out_dir = None
+        if not out_dir:
+            kept.append(spec)
+            continue
+        out_path = Path(str(out_dir))
+        if not out_path.is_absolute():
+            out_path = (DEFAULT_CFG_PATH.parent / out_path).resolve()
+        info_path = out_path / "stage_info.json"
+        success = False
+        if info_path.is_file():
+            try:
+                success = json.loads(info_path.read_text(encoding="utf-8")).get("success") is True
+            except (json.JSONDecodeError, OSError):
+                success = False
+        if success:
+            print(f"[Stage {spec.stage_id}] previously completed successfully — skipping (--skip-successful)")
+            continue
+        kept.append(spec)
+    return kept
+
+
 def build_cmd(spec: StageSpec, *, env_map: dict[str, str], exec_mode: str, python_bin: str, extra_overrides: list[str]) -> list[str]:
     base = [python_bin, spec.script, *extra_overrides]
     if exec_mode == "direct":
@@ -422,6 +468,7 @@ def run_pipeline(
     include_p2p: bool = False,
     detect_articulation: bool = False,
     bg_splat: bool = False,
+    skip_successful: bool = False,
 ) -> PipelineTimingResult:
     wall_start = time.perf_counter()
     timing_log_path = None if dry_run else resolve_scene_timing_log_path(extra_overrides)
@@ -434,6 +481,8 @@ def run_pipeline(
         bg_splat=bg_splat,
     )
     selected = select_stages(plan, include_ids=_parse_csv_set(include_ids_csv), exclude_ids=_parse_csv_set(exclude_ids_csv))
+    if skip_successful:
+        selected = filter_previously_successful(selected, extra_overrides)
 
     durations: dict[str, float] = {}
     memory_samples: dict[str, dict[str, float | None]] = {}

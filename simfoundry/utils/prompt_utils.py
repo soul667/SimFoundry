@@ -273,6 +273,7 @@ def prompt_list_articulated_objects(object_list):
     "### Task Description ###\n\n" + \
     f"In the following list of objects {object_list}, please list all the objects that are articulated, i.e., have a movable part or joint. " + \
     "You will also be given images of the objects. Analyze the images and determine if the object is articulated. Do not include objects where all articulated parts are smaller than 6 inches in every dimension (length, width, height). " + \
+    "If none of the objects are articulated, return an empty list for articulated_objects (i.e., \"articulated_objects\": []). " + \
     "Return the articulated objects in the following format:\n\n" + \
     "Return your final answer as a JSON object in the following format: " + \
     '''json
@@ -285,6 +286,13 @@ def prompt_list_articulated_objects(object_list):
     '''json
     {{
         "articulated_objects": ["cabinet", "fridge", "laptop"],
+        "non_articulated_objects": ["table", "shelf", "banana"],
+    }}  
+    ''' + \
+    "Example output2 (no articulated objects): " + \
+    '''json
+    {{
+        "articulated_objects": [],
         "non_articulated_objects": ["table", "shelf", "banana"],
     }}  
     '''

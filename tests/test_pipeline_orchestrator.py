@@ -227,3 +227,28 @@ def test_streaming_stage_cmds_forward_overrides(monkeypatch):
 
     assert s5_cmd[-2:] == ["scene_name=dining_1", "root_dir=/tmp/Data"]
     assert s6_cmd[-2:] == ["scene_name=dining_1", "root_dir=/tmp/Data"]
+
+
+def test_skip_successful_filters_recorded_stages(tmp_path):
+    from simfoundry.pipeline.orchestrator import filter_previously_successful
+
+    overrides = [f"root_dir={tmp_path}", "scene_name=scene"]
+    specs = [
+        StageSpec("2", "x.py", "s2_depth", "da3", "Run depth"),
+        StageSpec("3", "x.py", "s3_ground", "simfoundry", "Segment ground plane"),
+        StageSpec("4", "x.py", "s4_frame", "simfoundry", "Unify world frame"),
+        StageSpec("5", "x.py", "s5_scene", "simfoundry", "Decompose scene"),
+    ]
+
+    def mark(dirname, success):
+        stage_dir = tmp_path / "scene" / dirname
+        stage_dir.mkdir(parents=True)
+        (stage_dir / "stage_info.json").write_text(json.dumps({"success": success}))
+
+    mark("s2_da", True)     # stage 2 records under the selected backend's dir (da3 default)
+    mark("s3_ground", True)
+    mark("s4_frame", False)  # completed but unsuccessful -> must re-run
+    # stage 5 has no marker at all -> must run
+
+    kept = filter_previously_successful(specs, overrides)
+    assert [s.stage_id for s in kept] == ["4", "5"]

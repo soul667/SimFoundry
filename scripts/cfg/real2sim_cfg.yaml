@@ -247,6 +247,8 @@ s8_pose:          # env: simfoundry
   use_foundationpose: true
   est_refine_iter: 5  # Number of refinement iterations for FoundationPose
   object_indices: null  # null = all, or [1,2] for selective streaming/reruns
+  canonicalize_front: true      # VLM front-pick; rotates mesh front to +Z before fitting
+  front_pick_model: gemini-2.5-flash
   # use_any6d: true
   # resume_idx: Controls the interactive pose editing workflow (8b_match_object_poses_interactive.py)
   #   null  -> Normal mode: run pose fitting from scratch, auto-generate suffix for output
@@ -653,6 +655,7 @@ sim:          # env: simfoundry
   out_dir: "${root_dir}/${scene_name}/${sim.out_dirname}"
   hull_count: 32
   n_submesh: 10
+  canonicalize_front: true      # match cousin fronts to the originals' +Z convention
 usd: #env b1k
   rerun: true
   out_dirname: usd_cousins

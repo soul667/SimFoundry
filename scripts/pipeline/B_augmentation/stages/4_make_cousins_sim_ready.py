@@ -14,6 +14,7 @@ from pathlib import Path
 import json
 from simfoundry.utils.asset_conversion_utils import import_custom_object
 from simfoundry.models.vlm import Gemini
+from simfoundry.pipeline.front_canonicalization import canonicalize_front
 import hydra
 from simfoundry import CFG_DIR
 from omegaconf import OmegaConf
@@ -142,6 +143,24 @@ def main(cfg):
         scale = obj_info["z_up"]["scale"]
         tm = trimesh.load(mesh_path, process=True)
         tm.apply_scale(scale)
+        # Yaw-canonicalize the cousin front so it matches the original's convention.
+        if cfg.sim.get("canonicalize_front", True):
+            front_render_dir = str(out_dir / "front_views" / obj_name / var_type / mesh_path.stem)
+            front_rot, front_info = canonicalize_front(
+                tm,
+                render_dir=front_render_dir,
+                vlm=vlm,
+                photo_path=img_fpath,
+                category=obj_phrase,
+            )
+            if front_rot is not None:
+                _front_tf = np.eye(4)
+                _front_tf[:3, :3] = front_rot
+                tm.apply_transform(_front_tf)
+            with open(Path(front_render_dir) / "orientation.json", "w") as f:
+                json.dump(front_info, f, indent=4)
+            logger.info(f"Front canonicalization for {obj_category}: {front_info['status']} "
+                        f"(yaw={front_info['applied_yaw_deg']:.0f} deg)")
         obb_tf, obb_extent = trimesh.bounds.oriented_bounds(tm)
 
         result = vlm(

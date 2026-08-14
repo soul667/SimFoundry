@@ -19,6 +19,7 @@ often registers only a few.
 
 Should be run from the `nerfstudio_simfoundry` environment.
 """
+import json
 import logging
 import os
 import shutil
@@ -26,6 +27,7 @@ import subprocess
 from pathlib import Path
 
 import hydra
+from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +286,18 @@ def main(cfg):
         env=env,
         check=True,
     )
+
+    # ns-export can exit 0 without writing a splat, so success is recorded from the
+    # artifact itself. Written by hand rather than via stage_utils.finalize_stage,
+    # which would pull image-processing deps into the minimal Nerfstudio env.
+    exported_plys = sorted(str(p) for p in export_dir.glob("*.ply"))
+    stage_info = OmegaConf.to_container(s2c, resolve=True)
+    stage_info["success"] = bool(exported_plys)
+    stage_info["exported_plys"] = exported_plys
+    with open(base_dir / "stage_info.json", "w", encoding="utf-8") as f:
+        json.dump(stage_info, f, indent=4)
+    if not exported_plys:
+        raise FileNotFoundError(f"ns-export exited 0 but produced no .ply under {export_dir}")
     logger.info("Done. Export under %s", export_dir)
 
 

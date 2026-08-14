@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--stream-end-stage", type=int, default=8, help="Streaming subsequence end stage (5-8)")
     parser.add_argument("--detect-articulation", action="store_true", help="Run stage 8b after pose matching to decompose articulated objects (requires the optional articulate envs; ignored with a warning if absent)")
     parser.add_argument("--bg-splat", action="store_true", help="Include stage 2c (nerfstudio background Gaussian splat). Opt-in only — not enabled by default.")
+    parser.add_argument("--skip-successful", action="store_true", help="Skip stages whose stage_info.json records success=true for this scene. Markers mean 'completed once', not 'up to date': re-running an earlier stage does not invalidate downstream markers.")
     parser.add_argument("overrides", nargs="*", help="Additional Hydra overrides forwarded to each stage")
     args = parser.parse_args()
 
@@ -61,6 +62,7 @@ def main():
         extra_overrides=args.overrides,
         detect_articulation=args.detect_articulation,
         bg_splat=args.bg_splat,
+        skip_successful=args.skip_successful,
     )
 
 

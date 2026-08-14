@@ -41,6 +41,9 @@ Options:
   --max-vram-gb N                 Opt-in absolute hard VRAM budget for streaming, in GiB. Default: unset (uses the fraction)
   --detect-articulation           Run automated articulation decomposition stage 8b after stage 8.
   --bg-splat                      Include stage 2c (nerfstudio background Gaussian splat). Opt-in only — not run by default.
+  --skip-successful               Skip stages already recorded as successful for this scene
+                                  (stage_info.json). Means "completed once", not "up to date":
+                                  re-running an earlier stage does not invalidate later markers.
   --cache-mode                    Cache raw remote model responses.
   --test-mode                     Replay remote model responses from cache.
   --model-cache-dir DIR           Cache root. Default: .cache/simfoundry/model_calls
@@ -73,6 +76,7 @@ MAX_VRAM_FRAC="${MAX_VRAM_FRAC:-}"
 MAX_VRAM_GB="${MAX_VRAM_GB:-}"
 DETECT_ARTICULATION="${DETECT_ARTICULATION:-0}"
 BG_SPLAT="${BG_SPLAT:-0}"
+SKIP_SUCCESSFUL="${SKIP_SUCCESSFUL:-0}"
 CACHE_MODE_ENABLED=0
 TEST_MODE_ENABLED=0
 MODEL_CACHE_DIR="${SIMFOUNDRY_MODEL_CACHE_DIR:-}"
@@ -169,6 +173,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bg-splat)
       BG_SPLAT=1
+      shift
+      ;;
+    --skip-successful)
+      SKIP_SUCCESSFUL=1
       shift
       ;;
     --cache-mode)
@@ -278,6 +286,9 @@ if [[ "${DETECT_ARTICULATION}" == "1" ]]; then
 fi
 if [[ "${BG_SPLAT}" == "1" ]]; then
   CMD+=("--bg-splat")
+fi
+if [[ "${SKIP_SUCCESSFUL}" == "1" ]]; then
+  CMD+=("--skip-successful")
 fi
 
 CMD+=(

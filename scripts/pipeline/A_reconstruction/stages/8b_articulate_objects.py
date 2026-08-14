@@ -15,6 +15,7 @@ from simfoundry.utils.python_utils import sanitize_path_component
 from simfoundry.models.vlm import Gemini
 from omegaconf import OmegaConf
 from pathlib import Path
+import shutil
 import subprocess
 import logging
 import json
@@ -22,6 +23,8 @@ import hydra
 import os
 from simfoundry import CFG_DIR
 from simfoundry.pipeline.frame_selection import resolve_img_idx
+from simfoundry.pipeline.stage_utils import StageResult, finalize_stage
+from simfoundry.pipeline.front_canonicalization import read_orientation_yaw
 
 logger = logging.getLogger(__name__)
 
@@ -348,29 +351,54 @@ def main(cfg):
     sanitized_scene_name = sanitize_path_component(cfg.scene_name)
     objects_list = []
     expected_urdfs = []
-    
+    unprocessable = []  # articulated objects whose inputs are missing
+
+    def record_stage_result(success, **additional_info):
+        # cfg may carry an api_key override; never persist credentials into stage_info.json.
+        stage_cfg = OmegaConf.create(OmegaConf.to_container(cfg.s8b_articulate_objects, resolve=True))
+        if "api_key" in stage_cfg:
+            stage_cfg.api_key = None
+        finalize_stage(
+            stage_cfg=stage_cfg,
+            out_dir=out_dir,
+            result=StageResult(success=success, additional_info=additional_info),
+        )
+
     for obj_name in articulated:
         if obj_name not in object_list:
             logger.warning(f"'{obj_name}' not in object list, skipping")
+            unprocessable.append(obj_name)
             continue
-        
+
         iter_num = object_list[obj_name]
         mesh_path = f"{mesh_dir}/{iter_num}.glb"
         image_path = f"{upsampled_dir}/{iter_num}.png"
-        
+
         if not os.path.exists(mesh_path):
             logger.warning(f"Mesh not found: {mesh_path}")
+            unprocessable.append(obj_name)
             continue
         
-        # Check if already articulated (skip if output exists).
+        # Check if already articulated (skip if output exists AND the mesh orientation
+        # it was built from is unchanged).
         # Both components go through the shared sanitizer so stage 10 can find these again;
         # see simfoundry.utils.python_utils.sanitize_path_component.
         sanitized_name = sanitize_path_component(obj_name)
-        output_urdf = f"{out_dir}/{sanitized_scene_name}/{sanitized_name}/results/mobility.urdf"
+        obj_out_dir = f"{out_dir}/{sanitized_scene_name}/{sanitized_name}"
+        output_urdf = f"{obj_out_dir}/results/mobility.urdf"
+        mesh_yaw = read_orientation_yaw(f"{mesh_dir}/{iter_num}_orientation.json")
+        stamp_fpath = f"{obj_out_dir}/front_orientation.json"
         if os.path.exists(output_urdf):
-            logger.info(f"Skipping '{obj_name}' - already articulated")
-            continue
-        
+            if read_orientation_yaw(stamp_fpath) == mesh_yaw:
+                logger.info(f"Skipping '{obj_name}' - already articulated")
+                continue
+            logger.info(f"Re-articulating '{obj_name}': mesh orientation changed")
+            shutil.rmtree(obj_out_dir)
+
+        os.makedirs(obj_out_dir, exist_ok=True)
+        with open(stamp_fpath, "w") as f:
+            json.dump({"applied_yaw_deg": mesh_yaw}, f)
+
         objects_list.append({
             "name": sanitized_name,
             "mesh_path": os.path.abspath(mesh_path),
@@ -379,7 +407,15 @@ def main(cfg):
         expected_urdfs.append(output_urdf)
     
     if not objects_list:
+        # Nothing left to run: success only when every articulated object either has its
+        # URDF already or none were detected — missing inputs are recorded as failure so
+        # --skip-successful re-runs the stage once upstream provides them.
         logger.warning("No valid articulated objects to process!")
+        record_stage_result(
+            success=not unprocessable,
+            articulated_objects=list(articulated),
+            unprocessable_objects=unprocessable,
+        )
         return
     
     logger.info(f"Processing {len(objects_list)} objects: {[o['name'] for o in objects_list]}")
@@ -441,7 +477,18 @@ def main(cfg):
     
     # Run articulation
     run_articulation(config_name, conda_env, ARTICULATE_SIMFOUNDRY_PATH, expected_urdfs)
-    
+
+    # run_articulation raises when the subprocess fails or an expected URDF is absent;
+    # verify the deliverables anyway so the recorded success is a direct artifact check.
+    missing_urdfs = [p for p in expected_urdfs if not os.path.exists(p)]
+    record_stage_result(
+        success=not missing_urdfs and not unprocessable,
+        articulated_objects=list(articulated),
+        unprocessable_objects=unprocessable,
+        expected_urdfs=expected_urdfs,
+        missing_urdfs=missing_urdfs,
+    )
+
     logger.info("=" * 60)
     logger.info("Articulation complete!")
     logger.info("=" * 60)

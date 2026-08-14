@@ -32,6 +32,7 @@ from simfoundry.utils.processing_utils import compute_point_cloud_from_depth, pa
     dilate_mask, erode_mask, extract_numbers_from_str, denoise_obj_point_cloud
 from simfoundry.utils.prompt_utils import prompt_topk_image_select
 from simfoundry.pipeline.stage_utils import StageResult, bootstrap_hydra_workdir, finalize_stage, resolve_base_iteration
+from simfoundry.pipeline.front_canonicalization import canonicalize_front
 from simfoundry.pipeline.frame_selection import resolve_img_idx
 from simfoundry.utils.python_utils import atomic_output_path
 import multiprocessing
@@ -298,7 +299,7 @@ def main(cfg):
     mesh_dir = f"{cfg.s7_mesh.out_dir}/textured_mesh/{cfg.s7_mesh.texture_model}"
     out_dir = cfg.s8_pose.out_dir
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    dirs_to_create = ["pc", "canonical_mesh", "fit", "info"]
+    dirs_to_create = ["pc", "canonical_mesh", "fit", "info", "front_views"]
     for dir_name in dirs_to_create:
         Path(f"{out_dir}/{dir_name}").mkdir(parents=True, exist_ok=True)
 
@@ -440,8 +441,34 @@ def main(cfg):
         # rough voxel density
         source_obb_diag = np.linalg.norm(source.get_oriented_bounding_box().extent)
 
+        # Yaw-canonicalize the mesh front before fitting; the fitted pose absorbs the
+        # rotation, so mesh + pose stay a consistent pair downstream.
+        front_rot = None
+        front_info = {"applied_yaw_deg": 0.0, "status": "disabled"}
+        if cfg.s8_pose.get("canonicalize_front", True):
+            obj_phrase = None
+            obj_cat_fpath = f"{scene_dir}/obj_cat_list/{img_name}.json"
+            if os.path.exists(obj_cat_fpath):
+                with open(obj_cat_fpath) as f:
+                    obj_phrase = json.load(f).get("removed_obj_phrase")
+            front_rot, front_info = canonicalize_front(
+                trimesh.load(mesh_path, force="mesh"),
+                render_dir=f"{out_dir}/front_views/{img_name}",
+                photo_path=f"{cfg.s6_upsample.out_dir}/upsampled/{img_name}.png",
+                category=obj_phrase,
+                gcloud_project=cfg.gcloud_project,
+                model=cfg.s8_pose.get("front_pick_model", "gemini-2.5-flash"),
+            )
+            logger.info(f"Front canonicalization for {img_name}: {front_info['status']} "
+                        f"(yaw={front_info['applied_yaw_deg']:.0f} deg)")
+        with atomic_output_path(f"{out_dir}/canonical_mesh/{img_name}_orientation.json") as _tmp_orient, \
+                open(_tmp_orient, "w") as f:
+            json.dump(front_info, f, indent=4)
+
         # Read target mesh, convert to point cloud
         mesh = o3d.io.read_triangle_mesh(mesh_path, enable_post_processing=True)
+        if front_rot is not None:
+            mesh.rotate(front_rot, center=(0.0, 0.0, 0.0))
         target = mesh.sample_points_poisson_disk(number_of_points=10000)
         target = target.remove_non_finite_points()
         # o3d.visualization.draw_geometries([target])
@@ -526,6 +553,10 @@ def main(cfg):
 
         # Scale and save via trimesh using the FINAL pre_scale_factor (best from grid search)
         canonical_mesh_tm = trimesh.load(mesh_path)
+        if front_rot is not None:
+            _front_tf = np.eye(4)
+            _front_tf[:3, :3] = front_rot
+            canonical_mesh_tm.apply_transform(_front_tf)
         canonical_mesh_tm.apply_scale(final_pre_scale_factor)
         canonical_mesh_tm.export(canonical_mesh_fpath)
 
@@ -682,6 +713,7 @@ def main(cfg):
             },
             # Total scale = pre_scale_factor * tf_scale
             "pre_scale_factor": float(pre_scale_factor),
+            "front_canonicalization": front_info,
         }
 
         with atomic_output_path(f"{out_dir}/info/{img_name}.json") as _tmp_info, open(_tmp_info, "w") as f:
