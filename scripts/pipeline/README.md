@@ -61,6 +61,31 @@ Useful options:
 | `12` | `A_reconstruction/stages/12_import_usd.py` | `simfoundry` | Import assets into USD datasets. | dataset USD assets |
 | `13` | `A_reconstruction/stages/13_create_og_scene.py` | `simfoundry` | Create the final OG scene JSON and preview. | `s13_og/reconstructed_og_scene.json`, `reconstructed_scene.png` |
 
+### Mesh Generators
+
+Stage 7 supports two image-to-3D backends, selected with `s7_mesh.shape_model` and
+`s7_mesh.texture_model` (set both to the same value):
+
+- **Hunyuan3D-2.1** (`hunyuan`, the default). Runs in the `hunyuan` env built by
+  `install_everything.sh` and needs the RealESRGAN checkpoint from
+  `download_checkpoints.sh`. On cards below ~29 GB VRAM, set `s7_mesh.low_vram=true`
+  (CPU offloading, ~6 GB). This is the default `run.sh` invocation — nothing to pass.
+
+- **TRELLIS.2** (`trellis2`). Opt-in: install it with
+  `bash scripts/installation/install_trellis.sh` (or `install_simfoundry.sh --trellis`),
+  which adds it to the `simfoundry` env — so stage 7 must also be pointed at that env.
+  Model weights (`microsoft/TRELLIS.2-4B`) download automatically on the first run.
+
+  ```bash
+  bash scripts/pipeline/A_reconstruction/run.sh --scene-name <scene> --video-fpath <video> \
+    --env-mesh simfoundry \
+    -- s7_mesh.shape_model=trellis2 s7_mesh.texture_model=trellis2
+  ```
+
+Both write to the same layout (`s7_mesh/textured_mesh/<backend>/iter_N_mesh.glb`), so
+downstream stages need no other changes. To compare backends on one capture, run each into
+a separate `--scene-name`.
+
 ### Canonical Frame Selection
 
 Stages 3-13 reconstruct the scene from a *single* frame of the capture: stage 3 fits the
