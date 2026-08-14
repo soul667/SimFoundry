@@ -1,0 +1,37 @@
+# Sweep eval config for gr00t policy
+# Usage: python scripts/pipeline/sweep_eval.py --config scripts/cfg/eval_sweeps/gr00t_example.yaml
+
+policy_type: gr00t
+
+# Checkpoint selection
+checkpoint_dir: path/to/gr00t_checkpoints/checkpoints/your_checkpoint_dir
+checkpoint_name_prefix: your_checkpoint_name_prefix # can be null
+checkpoint_interval: 5000
+# checkpoint_range: "5000:20000"  # optional: only evaluate steps in this range
+
+# Evaluation
+eval_config: your_eval_config
+# eval_overrides:
+#   - "s15_eval.n_episodes=10"
+#   - "s15_eval.timeout_s=90"
+
+# gr00t server
+embodiment_tag: OXE_DROID
+num_inference_timesteps: 8
+server_port: 5555
+server_host: localhost
+server_startup_timeout: 180
+
+# Project paths
+gr00t_project_dir: ~/Projects/ISAAC-gr00t
+simfoundry_project_dir: ~/Projects/simfoundry
+gr00t_venv_cmd: "uv run"
+simfoundry_venv_cmd: ""
+
+# Output
+output_dir: ./sweep_results/your_output_dir
+
+# Options
+dry_run: false
+skip_plots: false
+resume: false
