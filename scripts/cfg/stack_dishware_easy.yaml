@@ -8,7 +8,7 @@ defaults:
 
 # ===== main cfg =====
 root_dir: ../../Data # Where you want to save the data, can be absolute or relative to this config file
-scene_name: droid_desk_stack_dishware_easy  # test # left_table #mail_scene_trellis_hunyuan
+scene_name: droid_desk_stack_dishware_easy
 seed: 0
 visualize: false
 debug: false

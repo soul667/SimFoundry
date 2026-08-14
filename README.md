@@ -24,7 +24,7 @@ Unlike prior scene reconstruction approaches, SimFoundry is fully modular: each 
 
 | Date | Update |
 |------|--------|
-| **2026-08-13** | 🚀 Initial open-source release: V0 rigid-body and articulation generation |
+| **2026-08-14** | 🚀 Initial open-source release: V0 rigid-body and articulation generation |
 | **Coming Soon** | Example scenes and assets |
 | **Coming Soon** | Automated background generation |
 | **Coming Soon** | Robotics data generation, training, and evaluation |
@@ -99,11 +99,13 @@ bash scripts/installation/download_checkpoints.sh --default
 bash scripts/installation/install_articulate.sh
 ```
 
+
 Full installation details: [INSTALL.md](docs/INSTALL.md)
 
 ## Common Examples
 
-Reconstruct a scene from video:
+Reconstruct a scene from video (example inputs in [`docs/assets/example_videos/`](docs/assets/example_videos),
+capture tips in [the pipeline README](scripts/pipeline/README.md#capturing-an-input-video)):
 
 ```bash
 bash scripts/pipeline/A_reconstruction/run.sh \

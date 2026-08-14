@@ -30,6 +30,10 @@ bash scripts/pipeline/A_reconstruction/run.sh \
   --video-fpath /path/to/video.mov
 ```
 
+Example captures are in `docs/assets/example_videos/` (repo root), e.g.
+`--video-fpath docs/assets/example_videos/Fruits.mp4`. Shooting your own? See
+[Capturing an input video](#capturing-an-input-video).
+
 Useful options:
 
 - `--pipeline video|stereo|zed`: input mode; default is `video`.
@@ -39,6 +43,30 @@ Useful options:
 - `--detect-articulation`: run stage 8b for automatic articulated-object generation. Requires the optional `articulate` environments; ignored with a warning if they are absent.
 - `--env-nerfstudio NAME`: select the Nerfstudio environment used by stage 2c. Default: `nerfstudio_simfoundry`.
 - `--env-b1k NAME`: env for the OmniGibson stages. Default: `simfoundry`; pass this only if OmniGibson lives in a separate env.
+
+### Capturing an input video
+
+Keep these in mind when taking an input video:
+
+1. **One flat surface.** Place every object on the same flat surface (a desk, a counter).
+   Keep other surfaces — a second table, shelves — out of frame: stage 3 fits a single
+   support plane.
+2. **Angle down at the surface.** Shoot at an oblique downward angle — not edge-on from
+   the side, not straight top-down — so both the surface and the sides of the objects
+   are visible.
+3. **Translate, don't rotate.** Sweep the camera sideways around the scene. Panning in
+   place gives the reconstruction no parallax.
+4. **Keep every object visible in every frame.** An object that leaves the frame can come
+   out missing or mis-posed.
+5. **Close all articulated objects.** Make sure all objects with joints (trash cans, cabinets) are closed.
+
+> See [`example_videos/`](../../docs/assets/example_videos)
+
+<img src="../../docs/assets/capture_lateral_sweep.png" alt="Start, middle, and end frames of an example capture: one table, camera angled down, sweeping laterally" width="100%">
+
+*Start, middle, and end of `docs/assets/example_videos/Fruits.mp4`: the
+camera stays angled down at one table, translates laterally, and keeps every object in
+frame throughout.*
 
 ### Stages
 

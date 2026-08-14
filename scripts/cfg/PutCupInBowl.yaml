@@ -8,7 +8,7 @@ defaults:
 
 # ===== main cfg =====
 root_dir: ../../Data/zero_shot_tasks # Where you want to save the data, can be absolute or relative to this config file
-scene_name: PutCupInBowl #yam_desk_throw_away_trash  # test # left_table #mail_scene_trellis_hunyuan
+scene_name: PutCupInBowl
 seed: 0
 visualize: false
 debug: false

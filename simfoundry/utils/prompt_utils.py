@@ -145,7 +145,9 @@ def prompt_object_setlist_specific_floorplane_v3(floor_category):
     "9. Only split into separate objects when components are clearly independent and not physically coupled (e.g., a banana resting on a plate, a pen lying on a notebook).\n\n" + \
     "10. Do not include walls, floors, windows, ceiling objects, or the main supporting surface itself.\n\n" + \
     "10.b. Do not include items that are not solid or that are stuck onto other objects such as magnets, sticky notes, tape, etc.\n\n" + \
+    "10.c. Do not include fixtures clamped or fastened to the edge of a surface (clamps, mounts, camera rigs) or their cables. A clamp, mount, or cable lying loose on the primary surface is a valid object and must be included.\n\n" + \
     f"11. Do not include the main surface itself, which is the {floor_category}.\n\n" + \
+    f"11.b. If more than one surface or piece of furniture is visible, only include objects resting on the single primary {floor_category} — the one covering the largest area of the image. Ignore objects on other, secondary surfaces (a background table, desk, cart, or shelf), even if clearly visible. Objects stacked on other objects that rest on the primary surface still count as on it, and a piece of furniture itself counts as an object when it rests on the primary {floor_category}.\n\n" + \
     "12. If multiple identical objects exist, only list one category entry for that object type.\n\n" + \
     "13. Include small objects if they are clearly visible, but do not invent objects or include objects that are mostly clipped out of frame.\n\n" + \
     "14. Return one bounding box for every object as `box_2d` in [ymin, xmin, ymax, xmax] format.\n\n" + \
