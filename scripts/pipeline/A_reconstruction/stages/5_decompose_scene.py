@@ -1949,7 +1949,9 @@ def main(cfg):
         mask_size = removal_mask.sum()
         # removal_original_pixel_alignment = np.all(resized_padded_img == current_rgb, axis=-1)
         # n_aligned_pixels = removal_original_pixel_alignment[removal_mask].sum()
-        removal_original_pixel_alignment = np.linalg.norm(resized_padded_img - current_rgb, axis=-1) < 50
+        # Both images are uint8; subtract as int16 so negative channel differences don't wrap to ~255.
+        removal_original_pixel_alignment = np.linalg.norm(
+            resized_padded_img.astype(np.int16) - current_rgb.astype(np.int16), axis=-1) < 50
         n_aligned_pixels = removal_original_pixel_alignment[removal_mask].sum()
         valid_pixel_proportion = float(n_aligned_pixels / mask_size)
         is_valid_removed_obj = bool(valid_pixel_proportion > min_valid_pixel_prop)
