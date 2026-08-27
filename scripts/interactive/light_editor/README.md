@@ -68,7 +68,7 @@ hf download nadunRanawaka1/simfoundry-assets --repo-type dataset --local-dir ass
 - **+ New scene…** composes a scene from a template known to load (its room,
   robot, ground plane and version block carry over; you pick which props).
   Composition is refused if any referenced asset would not resolve.
-- **Pipeline scenes**: `s13_og/reconstructed_og_scene.json` loads directly.
+- **Pipeline scenes**: `s14_og/reconstructed_og_scene.json` loads directly.
   Objects from `behavior-1k-assets` are encrypted and show as error rows
   (OmniGibson still loads them fine). Pass `--cameras-out <scene>_cameras` so
   two pipeline scenes' camera placements do not collide.
@@ -81,7 +81,7 @@ A pipeline scene has no background. Attach a scanned mesh room with:
 mamba run -n simfoundry-editor python scripts/interactive/light_editor/background_io.py \
   --scene <scene>.json --list                        # what is available
 mamba run -n simfoundry-editor python scripts/interactive/light_editor/background_io.py \
-  --scene <scene>.json --background droid_desk_mesh  # attach one
+  --scene <scene>.json --background droid_v1          # attach one
 ```
 
 After attaching, the tool probes the surface under each prop and fails loudly

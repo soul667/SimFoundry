@@ -39,7 +39,7 @@ s1_video:     # env: simfoundry
   video_fpath: "${root_dir}/Scene_Video/${scene_name}.MOV"
   n_subsampled_frames: 15
   # splat-prep mode: when true, emit splat-ready frames into s1_video so stage 2b
-  # (orig-DA3), stages 3-13, AND the auto_bg VOID stage all read ONE frame set:
+  # (orig-DA3), stages 3-14, AND the auto_bg VOID stage all read ONE frame set:
   #   frames_subsampled_<N>/frame_<i:04d>.png (resized to target_w x target_h)
   #   + input_video.mp4 + frame_index_map.json
   # (vs the default objects-only layout: frames_all/ + source-res frames_subsampled_<N>/).
@@ -105,7 +105,7 @@ s3_ground:    # env: simfoundry
   # in it, stage 4 makes its camera the world frame, and stage 5 crops every object out of it.
   # `auto` lets stage 3 score the candidates (see frame_selection below); an integer pins a
   # frame, which is what the pipeline used to do unconditionally. Stage 3 records the resolved
-  # index in s3_ground/frame_selection.json and stages 4-13 read it back from there.
+  # index in s3_ground/frame_selection.json and stages 4-14 read it back from there.
   img_idx: auto
   frame_selection:
     # heuristic -- geometry/sharpness scoring only, no remote calls
@@ -191,11 +191,24 @@ s7_mesh:          # env: mesh
   out_dir: "${root_dir}/${scene_name}/${s7_mesh.out_dirname}"
   generate_shape: true
   generate_texture: true
-  shape_model: hunyuan #hunyuan #trellis2 #direct3d
-  texture_model: hunyuan #hunyuan #trellis2
+  shape_model: hunyuan #hunyuan #trellis2 #pixal3d #direct3d
+  texture_model: hunyuan #hunyuan #trellis2 #pixal3d
   save_intermediates: true
   low_vram: false        # If true, enable CPU offloading to reduce GPU VRAM (~29GB -> ~6GB for shape gen)
   object_indices: null   # null = process all, or set [3, 7] to process specific objects
+  # Backend-specific generation options, forwarded to the generator. Keys the selected backend
+  # cannot accept are dropped with a warning. `seed` defaults to the global `seed` above.
+  # NOTE: this dict starts empty, so adding a key from the CLI needs Hydra's `+` prefix
+  # (`+s7_mesh.generation_kwargs.resolution=1024`); keys listed here are overridden normally.
+  # Examples for pixal3d:
+  #   resolution: 1536     # 1024 or 1536; 1024 is the low_vram default
+  #   fov: 0.2             # radians; skips MoGe-2 camera estimation. Try this if output is distorted
+  #   num_faces: 300000    # decimation target
+  #   remesh: true
+  #   remesh_project: 0     # 0 = upstream default; trellis2 uses 0.9
+  #   max_num_tokens: 49152
+  #   shape_slat_sampling_steps: 12   # ss_ / shape_slat_ / tex_slat_ prefixes route to samplers
+  generation_kwargs: {}
 stage_review:
   mode: upsample   # options: depth, upsample, mesh
 stream_subseq:
@@ -228,6 +241,20 @@ stream_subseq:
   # card before the stage even starts. Stage 5's estimate matches its measured ~14 GiB
   # peak; actual usage is governed at runtime by the measured-usage check (hard_vram_cap).
   # Stage 7 additionally needs s7_mesh.low_vram=true on cards below ~29 GiB.
+  #
+  # NOTE for pixal3d: stage 7's estimate below assumes the default `hunyuan` backend; raise it
+  # when selecting pixal3d, or stage 7 is admitted alongside stage 6 and then OOMs.
+  #   pixal3d  ~15 MEASURED with s7_mesh.low_vram=true (resolution 1024): 14.22 GiB peak on an
+  #            RTX 4090, 409x409 input, torch.cuda.max_memory_allocated. Larger inputs cost more.
+  #            The resolution-1536 default (s7_mesh.low_vram=false) was TESTED on the same
+  #            RTX 4090 and OOMs — do not use it on 24 GiB. Treat low_vram=true as required there.
+  #            Peak briefly exceeds the pipeline itself because MoGe-2 is moved onto the GPU for
+  #            camera estimation while the pipeline is resident (it is parked on CPU otherwise).
+  # An estimate larger than the budget (max_vram_frac * total, default 0.9) is rejected outright,
+  # so on a 24 GiB card pixal3d at 1536 needs max_vram_frac raised or low_vram=true.
+  # Streaming relaunches stage 7 per object, reloading ~18 GiB of models every time, so
+  # `--no-stream` (or `--include 7`) is an operational requirement with pixal3d, not a tuning
+  # suggestion. Leaving streaming on is slow enough to look like a hang.
   stage_vram_gb:
     5: 14
     6: 4
@@ -248,8 +275,30 @@ s8_pose:          # env: simfoundry
   use_foundationpose: true
   est_refine_iter: 5  # Number of refinement iterations for FoundationPose
   object_indices: null  # null = all, or [1,2] for selective streaming/reruns
-  canonicalize_front: true      # VLM front-pick; rotates mesh front to +Z before fitting
-  front_pick_model: gemini-2.5-flash
+  canonicalize_front: true      # VLM front-pick; rotates the (uprighted) mesh front to +Z
+  front_pick_model: gemini-3.1-pro-preview
+  # Fine yaw passes for tilt-baked (pixel-aligned) meshes ONLY — canonical backends land
+  # exactly on the 45-degree grid and a re-pick can only move them off it.
+  # front_refine: second VLM pass over +/-22.5 deg in 7.5-deg steps around the coarse pick.
+  front_refine: true
+  # front_yaw_snap: align the upright footprint's min-area rectangle with the x/z axes
+  # (bounded to +/-45 deg; skipped for round footprints).
+  front_yaw_snap: true
+  # Pixel-aligned backends (pixal3d) generate in the conditioning image's camera frame, so the
+  # conditioning viewpoint's elevation/roll is baked into the s7 mesh (measured ~34 deg on a
+  # real run, vs <10 deg for hunyuan/trellis, which emit a canonical upright frame). The
+  # full-SO(3) fit measures that tilt against the scene cloud; when trusted, its pitch/roll
+  # component is baked into canonical_mesh (consumed by stage 9 articulation, stages 10/11, and
+  # cousin generation) and the stored pose keeps only gravity yaw + translation + scale.
+  # With use_foundationpose the tilt is re-derived from FoundationPose's pose, which
+  # disambiguates the symmetry flips that fool the CPD restarts on boxy objects.
+  # auto = bake only for pixel-aligned shape backends (pixal3d). Canonical-frame backends
+  # (hunyuan/trellis2/direct3d) are upright by construction, so a fitted tilt there is a fit
+  # error or the object's physical placement — baking either corrupts the mesh. true/false force it.
+  bake_fitted_tilt: auto
+  min_tilt_deg: 10.0        # below this the mesh already counts as upright — no bake, no churn
+  max_tilt_deg: 80.0        # an implied tilt above this is treated as a failed fit — no bake
+  tilt_consensus_deg: 20.0  # top fits must agree on the up axis within this angle to be trusted
   # use_any6d: true
   # resume_idx: Controls the interactive pose editing workflow (8b_match_object_poses_interactive.py)
   #   null  -> Normal mode: run pose fitting from scratch, auto-generate suffix for output
@@ -259,10 +308,10 @@ s8_pose:          # env: simfoundry
   #   N     -> Load from info_interactive_N/, save to info_interactive_{N+1}/
   # This allows iterative refinement of object poses through multiple interactive sessions.
   resume_idx: 1
-s8b_articulate_objects:
+s9_articulate_objects:
   rerun: true
-  out_dirname: s8b_articulate_objects
-  out_dir: "${root_dir}/${scene_name}/${s8b_articulate_objects.out_dirname}"
+  out_dirname: s9_articulate_objects
+  out_dir: "${root_dir}/${scene_name}/${s9_articulate_objects.out_dirname}"
   vlm_model: gemini-3.1-pro-preview
   vlm_backend: vertex                 # [vertex] — routes all articulation VLM calls (classifier + s2/s4/s5) through Vertex AI Gemini using gcloud_project
   method: hunyuan # options : [hunyuan, partfield]
@@ -277,15 +326,20 @@ s8b_articulate_objects:
   s5_max_iter: 5
   s5_num_seeds: 1
   merge_interactive_correction: false # Keep the generated articulation workflow unattended by default
+  # Interactive joint-refinement UI (articulate-anything step 6): opens a web UI
+  # after articulation to refine joint limits, pivots, axes, and dynamics.
+  # Also applies to already-articulated objects (they are passed through the
+  # workflow for refinement without being re-articulated).
+  interactive_joint_refinement: false
   # Classification review options:
   classification_only: false          # If true, stop after writing object_classification.json
   interactive_review: false          # If true, prompt user to review/modify VLM classification
   force_articulated: []               # List of object names to force as articulated (overrides VLM)
   force_non_articulated: ["white robotic arm", 'white and black robotic arm', 'small black electronic component', 'blue cup', 'small metallic sensor', 'purple cable']           # List of object names to force as non-articulated (overrides VLM)
-s9_compile:      # env: simfoundry
+s10_compile:      # env: simfoundry
   rerun: true
-  out_dirname: s9_compile
-  out_dir: "${root_dir}/${scene_name}/${s9_compile.out_dirname}"
+  out_dirname: s10_compile
+  out_dir: "${root_dir}/${scene_name}/${s10_compile.out_dirname}"
   # use_interactive_pose: Whether to use manually-refined poses from interactive editing sessions
   #   false -> Use automatic poses from info/ directory (output of 8_match_object_poses.py)
   #   true  -> Use interactive poses from info_interactive{interactive_suffix}/ directory
@@ -297,33 +351,37 @@ s9_compile:      # env: simfoundry
   #   "_2" -> Use info_interactive_2/ (third interactive session), etc.
   # Must match the suffix used when saving poses in 8b_match_object_poses_interactive.py
   interactive_suffix: "_2"
-s10_sim:          # env: simfoundry
+s11_sim:          # env: simfoundry
   rerun: true
-  out_dirname: s10_sim
-  out_dir: "${root_dir}/${scene_name}/${s10_sim.out_dirname}"
+  out_dirname: s11_sim
+  out_dir: "${root_dir}/${scene_name}/${s11_sim.out_dirname}"
   vlm_model: gemini-3.1-pro-preview   # options: gemini-2.5-pro, gemini-2.5-flash, gemini-3.1-pro-preview
   object_indices: null
   parallel_workers: 2
   collision_method: coacd
   hull_count: 32
   n_submesh: 10
-s11_physics:      # env: simfoundry
+s12_physics:      # env: simfoundry
   rerun: true
-  out_dirname: s11_physics
-  out_dir: "${root_dir}/${scene_name}/${s11_physics.out_dirname}"
+  out_dirname: s12_physics
+  out_dir: "${root_dir}/${scene_name}/${s12_physics.out_dirname}"
   load_at_once: true    # Whether to load all objects at once, then stabilize them together simultaneously, load in reverse order if false.
-s12_usd: #env b1k
+s13_usd: #env b1k
   rerun: true
-  out_dirname: s12_usd
-  out_dir: "${root_dir}/${scene_name}/${s12_usd.out_dirname}"
+  out_dirname: s13_usd
+  out_dir: "${root_dir}/${scene_name}/${s13_usd.out_dirname}"
   dataset_name: real2sim-assets
   # Materials opacity threshold for USD export of TRELLIS2 meshes
   opacity_threshold: 0.5
-s13_og:
+  # Bind materials through OmniGibson's asset pipeline so the metalness/glossiness maps
+  # stage 11 writes (map_Pm/map_Pr) reach the USD. Objects whose base color carries real
+  # alpha keep the URDF importer's OmniPBR_Opacity materials for the opacity pass above.
+  asset_pipeline_materials: true
+s14_og:
   rerun: true
-  out_dirname: s13_og
-  out_dir: "${root_dir}/${scene_name}/${s13_og.out_dirname}"
-  dataset_name: ${s12_usd.dataset_name}
+  out_dirname: s14_og
+  out_dir: "${root_dir}/${scene_name}/${s14_og.out_dirname}"
+  dataset_name: ${s13_usd.dataset_name}
   robot_config:
     type: FrankaPanda
     # Public OmniGibson robot assets include the stock Panda gripper. Robotiq
@@ -361,9 +419,9 @@ s13_og:
 s14_teleop:
   rerun: true
   task_name: ${task.task_name}                  # Task YAML name (use task=load_scene then task.task_name=serve_the_orange for scene-specific task)
-  scene_json_name: null                            # Name of scene JSON to load (located in SIMFOUNDRY_ASSET_DIR/scenes, without json extension) (null = use s13_og output)
+  scene_json_name: null                            # Name of scene JSON to load (located in SIMFOUNDRY_ASSET_DIR/scenes, without json extension) (null = use s14_og output)
   # Scene source options:
-  # - reconstructed: use the reconstructed scene from s13_og
+  # - reconstructed: use the reconstructed scene from s14_og
   # - load_sampling: load sampled scene(s) from sampling_scene/auto_generation and collect success_demo_per_sampling successful demos per scene into one HDF5
   scene_source: reconstructed             # "reconstructed" | "load_sampling"
   sampling_scene_indices: null                # When scene_source=load_sampling: null = all valid scenes, or list of indices to select (e.g. [0], [0,2,5])
@@ -410,7 +468,7 @@ s15_eval:       # env: b1k -- Evaluate Gr00t checkpoint on OmniGibson scene
   # port: 5555 # 8000 for OpenPI, 5555 for Gr00t
   out_dir: "${root_dir}/${scene_name}/${s15_eval.out_dirname}/${s15_eval.policy}"
   asset_id: franka                        # Normalization stats ID: 'franka' (joint pos) or 'droid' (joint vel)
-  scene_json: droid_desk_stack_dishware                # Path to scene JSON (null = use s13_og output)
+  scene_json: droid_desk_stack_dishware                # Path to scene JSON (null = use s14_og output)
   use_floor_plane: true
   floor_plane_visible: false
   external_sensors_cfg: nv_franka_droid   # Located in <CFG_DIR>/external_sensors
@@ -647,9 +705,12 @@ cousin_generation:    # env: mesh
   out_dir: "${root_dir}/${scene_name}/cousin_generation"
   generate_shape: true
   generate_texture: true
-  shape_model: hunyuan #direct3d
-  texture_model: hunyuan
+  shape_model: hunyuan #hunyuan #trellis2 #pixal3d #direct3d
+  texture_model: hunyuan #hunyuan #trellis2 #pixal3d
   keep_original_mass_friction: true  # If true, copy mass/friction from original source object instead of querying VLM
+  low_vram: false        # If true, enable CPU offloading to reduce GPU VRAM
+  # See s7_mesh.generation_kwargs above for the available keys.
+  generation_kwargs: {}
 sim:          # env: simfoundry
   rerun: true
   out_dirname: sim_cousins

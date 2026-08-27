@@ -10,7 +10,7 @@ This guide covers the standard SimFoundry setup: environments, checkpoints, serv
 - `ffmpeg`
 - ~250 GB of free disk space for a full install (conda envs ≈ 100 GB, `deps/` ≈ 82 GB of
   which the VOID model alone is 41 GB, Hugging Face cache ≈ 12 GB, plus checkpoints)
-- Hugging Face account for gated models such as SAM3
+- Hugging Face account for gated models such as SAM3, and DINOv3 for the optional `pixal3d` mesh backend
 - Google Cloud project with the Vertex AI API and billing enabled — the pipeline's VLM stages (reconstruction, articulation, and B augmentation) run on Vertex AI (Gemini). Authenticate with `gcloud auth application-default login`
 - ZED SDK only if you plan to use ZED capture
 
@@ -24,7 +24,7 @@ VRAM:
   offloading. 24 GiB works for the standard video pipeline with that flag.
 - More VRAM improves throughput for streamed reconstruction and high-resolution background
   runs. Pass `--max-vram-gb N` only to pin an absolute cap.
-- The optional articulation stage (8b) needs a minimum of 18 GiB — see
+- The optional articulation stage (9) needs a minimum of 18 GiB — see
   [Articulation Dependencies](#articulation-dependencies).
 
 ## 1. Clone The Repository
@@ -89,7 +89,90 @@ Optional environments:
 | Env | Purpose | Script |
 |---|---|---|
 | `3dgrut` | Convert Gaussian splats to USDZ for auto-background scenes. | `install_3dgrut.sh` |
-| `articulate` | Articulation generation dependencies (stage 8b). | `install_articulate.sh` |
+| `articulate` | Articulation generation dependencies (stage 9). | `install_articulate.sh` |
+
+Optional mesh-generation backends. Pass the env they live in to the pipeline with
+`--env-mesh NAME`, and select the backend with `s7_mesh.shape_model` / `s7_mesh.texture_model`.
+The two installers behave differently:
+
+- `install_trellis.sh` installs **into** an existing env (default `simfoundry`) and pins shared
+  packages there; if that env is missing it offers to create it via `install_simfoundry.sh --trellis`.
+- `install_pixal3d.sh` defaults to a dedicated **`pixal3d`** env, requires it to already exist
+  (build it with `install_trellis.sh --env-name pixal3d`), and refuses `simfoundry` outright
+  unless `--allow-shared-env` is passed.
+
+| Backend | Purpose | Script |
+|---|---|---|
+| `trellis2` | TRELLIS.2 mesh generation, an alternative to the default `hunyuan`. | `install_trellis.sh` |
+| `pixal3d` | Pixal3D pixel-aligned mesh generation. Builds on the TRELLIS.2 stack, so run `install_trellis.sh` into the same env first. Pulls gated DINOv3 weights at runtime. | `install_pixal3d.sh` |
+
+`pixal3d` generates shape and texture in a single pipeline, so it must be set as **both**
+`shape_model` and `texture_model`. Its requirements conflict with the `simfoundry` env's pins,
+so install it into a dedicated env:
+
+```bash
+cd scripts/installation
+bash install_trellis.sh --project-root ../.. --env-name pixal3d
+bash install_pixal3d.sh --project-root ../.. --env-name pixal3d
+```
+
+Then run stage 7 with it — but note that **stages 5-8 streaming is enabled by default and
+relaunches stage 7 once per object**, which reloads Pixal3D, four DINOv3 encoders, MoGe-2 and
+NAF every time. Until stage 7 gains a persistent worker, use `--include 7` or `--no-stream`:
+
+```bash
+# stage 7 only
+scripts/pipeline/A_reconstruction/run.sh --env-mesh pixal3d --include 7 \
+    s7_mesh.shape_model=pixal3d s7_mesh.texture_model=pixal3d s7_mesh.low_vram=true
+
+# full pipeline, streaming off
+scripts/pipeline/A_reconstruction/run.sh --env-mesh pixal3d --no-stream \
+    s7_mesh.shape_model=pixal3d s7_mesh.texture_model=pixal3d s7_mesh.low_vram=true
+```
+
+`s7_mesh.low_vram=true` is **required on a 24 GiB card and is part of the supported profile**,
+not an optimization. It selects resolution 1024. `s7_mesh.low_vram` defaults to `false`, which
+selects resolution **1536 — measured to OOM on an RTX 4090** (24 GiB). Only override it on a
+card with materially more memory.
+
+Backend options go through `s7_mesh.generation_kwargs` (and `cousin_generation.generation_kwargs`).
+Because that dict starts empty, adding a key from the CLI needs Hydra's `+` prefix:
+
+```bash
+scripts/pipeline/A_reconstruction/run.sh --env-mesh pixal3d --include 7 \
+    s7_mesh.shape_model=pixal3d s7_mesh.texture_model=pixal3d \
+    +s7_mesh.generation_kwargs.resolution=1024 \
+    +s7_mesh.generation_kwargs.fov=0.2
+```
+
+(Set them in the YAML instead and plain `key=value` overrides work.) Keys the selected backend
+cannot accept are dropped with a warning. `seed` defaults to the global `seed`.
+
+Caveats, in rough order of how likely they are to bite:
+
+- **Validated on exactly one object.** `trashcan_closed` completed stages 7 → 13 plus 9
+  articulation on an RTX 4090 at `low_vram=true` / resolution 1024 (stage 7 ≈ 133 s; 281k verts,
+  4096² PBR). Multi-object scenes, resolution 1536, and cousin generation are **unexercised** —
+  treat `pixal3d` as experimental outside that envelope.
+- **`--no-stream` (or `--include 7`) is a requirement, not a tuning tip.** Streaming relaunches
+  stage 7 per object and reloads ~18 GiB of models each time.
+- **Orientation is unvalidated.** Pixal3D generates in the input view's frame rather than a
+  canonical one, so stage 8 pose matching needs checking before relying on it for a full scene.
+- **Cousin generation (stage B/3) is experimental with this backend.** B only rescales the cousin
+  and then reuses the original object's stage-8 pose, so a view-aligned mesh is not registered to
+  it. Prefer `hunyuan`/`trellis2` for cousins until registration exists or same-view input is
+  enforced.
+- **RGBA inputs are required.** The alpha channel must already isolate the object (stage 6
+  produces exactly this), because SimFoundry does not load Pixal3D's gated, non-commercial
+  background-removal model. Other inputs are rejected with an explanatory error.
+- **VRAM.** Measured **14.2 GiB peak** with `s7_mesh.low_vram=true` (resolution 1024) on an
+  RTX 4090 — the supported profile. The `low_vram=false` default (resolution 1536) was also
+  tested on the same card and **OOMs**, so 24 GiB users must set `low_vram=true`.
+  Update `stream_subseq.stage_vram_gb[7]` if you use streaming anyway.
+
+The `hunyuan` backend is installed by `install_hunyuan.sh` as part of the standard setup above.
+The `direct3d` and `trellis` backend names are also registered but have no install script; you
+must set them up yourself.
 
 OpenPI policy evaluation needs no separate environment: the `openpi-client` package is
 installed into the `simfoundry` env by `install_simfoundry.sh`.
@@ -230,7 +313,7 @@ See [scripts/pipeline/A_reconstruction/stages/auto_bg_reconstruction/README.md](
 Articulation is optional. If these environments are not installed, `--detect-articulation` is
 ignored with a warning and the rest of the reconstruction pipeline runs normally.
 
-Articulation (stage 8b, `--detect-articulation`) is an optional component installed by:
+Articulation (stage 9, `--detect-articulation`) is an optional component installed by:
 
 ```bash
 bash scripts/installation/install_articulate.sh --default
@@ -242,7 +325,7 @@ conda environment per segmentation backend: `articulate-anything-{hunyuan,partfi
 Requirements specific to articulation:
 
 - **VRAM** — articulation needs a minimum of 18 GiB of GPU memory. The 16 GiB minimum for
-  the standard pipeline does not cover stage 8b: the segmentation and part-decomposition
+  the standard pipeline does not cover stage 9: the segmentation and part-decomposition
   models allocate outside the pipeline's VRAM scheduler.
 - **Source** — the fork is cloned from
   [`nadunRanawaka1/articulate-anything-sf`](https://github.com/nadunRanawaka1/articulate-anything-sf).
@@ -320,6 +403,11 @@ a Territory that **excludes the European Union, the United Kingdom, and South Ko
 — users in those places receive no rights from that license. A copy of the Agreement
 ships at
 [`third_party_notices/Hunyuan3D-2.1-LICENSE.txt`](../third_party_notices/Hunyuan3D-2.1-LICENSE.txt).
+
+The optional `pixal3d` backend adds **DINOv3** (Meta, custom gated licence — you must accept its
+terms before installing) and **NAF**, whose pinned checkout vendors DINOv3-licensed source that
+executes on every generation. A machine or image with `pixal3d` installed therefore carries
+DINOv3 terms; do not describe such a build as Apache-only or fully open source.
 
 For each of these, the **component disclosure matrix** in
 [THIRD_PARTY_LICENSES.md §6](../THIRD_PARTY_LICENSES.md#6-component-disclosure-matrix--restricted-and-optional-components)

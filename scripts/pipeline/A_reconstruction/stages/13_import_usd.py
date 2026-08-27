@@ -17,6 +17,7 @@ import omnigibson as og
 from omnigibson.utils.asset_utils import get_dataset_path
 from pathlib import Path
 import json
+import shutil
 import subprocess
 import hydra
 from simfoundry import CFG_DIR
@@ -56,12 +57,12 @@ def imported_usd_path(dataset_name: str, obj_category: str, obj_model: str) -> s
 
 @hydra.main(config_name="real2sim_cfg", config_path=CFG_DIR, version_base="1.3")
 def main(cfg):
-    sim_dir = cfg.s10_sim.out_dir
-    out_dir = cfg.s12_usd.out_dir
+    sim_dir = cfg.s11_sim.out_dir
+    out_dir = cfg.s13_usd.out_dir
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     # null disables the pass, leaving whatever the importer authored.
-    opacity_threshold = cfg.s12_usd.get("opacity_threshold", 0.5)
+    opacity_threshold = cfg.s13_usd.get("opacity_threshold", 0.5)
 
     # Load scene objects info
     scene_objects_info_fpath = f"{sim_dir}/scene_objects_info.json"
@@ -88,24 +89,34 @@ def main(cfg):
         is_articulated = obj_info.get("is_articulated", False)
         
         # Import
-        subprocess.run([
+        # Uses simfoundry.utils.og_asset_import rather than OmniGibson's own
+        # `examples.objects.import_custom_object`: that example passes `keep_instanceable=` to
+        # import_og_asset_from_urdf, which current OmniGibson main no longer declares, so it
+        # fails with TypeError before importing anything. Our module reproduces the URDF path of
+        # that example and filters arguments against the installed signature, so it works across
+        # the OmniGibson revisions this repo can have checked out. See that module's docstring.
+        import_cmd = [
             "python",
-            "-m", "omnigibson.examples.objects.import_custom_object",
-            "--dataset-name", "real2sim-assets",
+            "-m", "simfoundry.utils.og_asset_import",
+            "--dataset-name", cfg.s13_usd.dataset_name,
             "--asset-path", obj_urdf_fpath,
             "--category", obj_category,
             "--model", obj_model,
             "--collision-method", "none",
-            "--no_keep_instanceable",
-            # "--no_import_inertia",
-            "--headless",
+            # keep_instanceable is intentionally omitted (equivalent to the old
+            # --no_keep_instanceable), matching upstream's _ALLOW_INSTANCING = False.
             "--overwrite",
-        ], check=True)
+        ]
+        if cfg.s13_usd.get("asset_pipeline_materials", True):
+            import_cmd.append("--asset-pipeline-materials")
+        subprocess.run(import_cmd, check=True)
         
         # For articulated objects, reparent joints in the USD file
         # OmniGibson expects joints to be children of their parent link prims,
         # but Isaac Sim's URDF importer places them in a separate /joints scope
-        usd_path = imported_usd_path(cfg.s12_usd.dataset_name, obj_category, obj_model)
+        usd_path = imported_usd_path(cfg.s13_usd.dataset_name, obj_category, obj_model)
+        if not os.path.exists(usd_path):
+            raise FileNotFoundError(f"Import produced no USD for {obj_name} at: {usd_path}")
 
         if is_articulated:
             if os.path.exists(usd_path):
@@ -130,13 +141,21 @@ def main(cfg):
             else:
                 logger.warning(f"USD file not found for opacity threshold: {usd_path}")
 
+        # The importer writes into the shared BEHAVIOR dataset folder; keep a copy of the
+        # finished asset (post reparent/opacity) with the scene's own outputs as well.
+        dataset_obj_dir = os.path.join(
+            get_dataset_path(cfg.s13_usd.dataset_name), "objects", obj_category, obj_model)
+        stage_obj_dir = os.path.join(out_dir, "objects", obj_category, obj_model)
+        shutil.copytree(dataset_obj_dir, stage_obj_dir, dirs_exist_ok=True)
+        logger.info(f"Copied imported asset to stage output: {stage_obj_dir}")
+
     logger.info("="*60)
     logger.info("USD import complete!")
     logger.info("="*60)
 
     finalize_stage(
-        stage_cfg=cfg.s12_usd,
-        out_dir=cfg.s12_usd.out_dir,
+        stage_cfg=cfg.s13_usd,
+        out_dir=cfg.s13_usd.out_dir,
         result=StageResult(success=True),
     )
 

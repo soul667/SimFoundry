@@ -18,7 +18,7 @@ parameters and task proposals. The pipeline runs in three stages under
 
 | Stage | Directory | Produces |
 |---|---|---|
-| A — reconstruction | `A_reconstruction/stages/` | Depth, segmentation, meshes, `s10_sim/scene_objects_info.json`, `s11_physics/pb_scene_poses.json`, an OmniGibson scene |
+| A — reconstruction | `A_reconstruction/stages/` | Depth, segmentation, meshes, `s11_sim/scene_objects_info.json`, `s12_physics/pb_scene_poses.json`, an OmniGibson scene |
 | B — augmentation | `B_augmentation/stages/` | Digital-cousin variants, scene sampling, task proposals |
 | C — application | `C_application/stages/` | Teleop, demo generation, policy evaluation |
 

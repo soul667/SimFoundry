@@ -234,7 +234,7 @@ Given a reconstructed scene, SimFoundry uses a VLM to propose geometry, topology
 ## Scene Editors
 
 Two editors work with OmniGibson scene JSON — either a scene the editor saved
-(`*_scene_state_*.json`) or Pipeline A's own output (`s13_og/reconstructed_og_scene.json`):
+(`*_scene_state_*.json`) or Pipeline A's own output (`s14_og/reconstructed_og_scene.json`):
 
 - **Light editor** — a browser-based scene editor (no OmniGibson required) for composing
   scenes, placing and scaling props, editing camera rigs, associating tasks, and exporting a
@@ -301,8 +301,8 @@ Pipeline data is written under `Data/<scene_name>/`. Key outputs:
 
 | Path | Description |
 |---|---|
-| `s13_og/reconstructed_og_scene.json` | Final OmniGibson scene descriptor |
-| `s13_og/reconstructed_scene.png` | Scene preview image |
+| `s14_og/reconstructed_og_scene.json` | Final OmniGibson scene descriptor |
+| `s14_og/reconstructed_scene.png` | Scene preview image |
 | `prompt_cousin_structured/` | Digital cousin image proposals |
 | `sim_cousins/` and `usd_cousins/` | Simulation-ready cousin assets |
 | `proposed_tasks/` | Generated task YAMLs |

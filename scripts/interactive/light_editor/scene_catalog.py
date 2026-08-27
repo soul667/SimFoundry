@@ -313,7 +313,7 @@ def generated_scene_name(path):
 
     Reconstructed scenes are all saved as
     ``reconstructed_og_scene_scene_state_<tag>.json``, so the run directory
-    under ``Data`` supplies the name. The stage directory (e.g. ``s13_og``) is
+    under ``Data`` supplies the name. The stage directory (e.g. ``s14_og``) is
     appended only when needed to tell rows apart: when a run holds more than
     one scene, or shares its name with a preset scene. Only applied to the
     generated tree; a preset scene's filename is already its own name.

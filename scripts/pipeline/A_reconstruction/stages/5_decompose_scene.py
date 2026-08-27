@@ -38,7 +38,7 @@ from torchvision.ops.boxes import box_convert
 import tempfile
 import json
 import re
-from collections import defaultdict, deque
+from collections import defaultdict
 from matplotlib import colormaps
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
@@ -47,6 +47,7 @@ from sentence_transformers import SentenceTransformer
 from simfoundry.utils.python_utils import assert_valid_key
 from simfoundry.pipeline.stage_utils import StageResult, bootstrap_hydra_workdir, finalize_stage
 from simfoundry.pipeline.frame_selection import resolve_img_idx
+from simfoundry.pipeline.support_graph import support_levels
 from simfoundry.utils.python_utils import atomic_output_path
 import hydra
 import logging
@@ -389,7 +390,6 @@ def compute_object_removal_order(
     # This must be computed before occlusion so we can exclude supporting objects
     # from the occlusion check.
     on_top_of = defaultdict(set)   # B -> set of objects that B sits on top of
-    supports = defaultdict(set)    # A -> set of objects that sit on top of A
 
     for phrase_b in phrases:
         ch_b = obj_chs[phrase_b]
@@ -424,7 +424,6 @@ def compute_object_removal_order(
 
             if down_fraction >= support_ray_fraction_threshold or containment_fraction >= containment_fraction_threshold:
                 on_top_of[phrase_b].add(phrase_a)
-                supports[phrase_a].add(phrase_b)
                 reason = []
                 if down_fraction >= support_ray_fraction_threshold:
                     reason.append(f"downward rays={down_fraction:.2f}")
@@ -432,30 +431,14 @@ def compute_object_removal_order(
                     reason.append(f"containment={containment_fraction:.2f}")
                 logger.info(f"Support: {phrase_b} is on top of {phrase_a} ({', '.join(reason)})")
 
-    # Compute support levels via BFS from leaves (objects with nothing on top)
-    # Level 0 = nothing on top (remove first), higher = deeper in stack
-    support_level = {}
-    # Objects with nothing on top of them are level 0
-    leaves = [p for p in phrases if len(supports.get(p, set())) == 0]
-    queue = deque()
-    for leaf in leaves:
-        support_level[leaf] = 0
-        queue.append(leaf)
-
-    while queue:
-        current = queue.popleft()
-        current_level = support_level[current]
-        # Objects that current sits on top of get level = max(their current level, current_level + 1)
-        for below in on_top_of.get(current, set()):
-            new_level = current_level + 1
-            if below not in support_level or support_level[below] < new_level:
-                support_level[below] = new_level
-                queue.append(below)
-
-    # Any object not yet assigned (e.g. in a cycle) gets level 0
-    for p in phrases:
-        if p not in support_level:
-            support_level[p] = 0
+    # Support levels: longest chain of objects stacked above each object, with
+    # mutually-supporting cycles (ambiguous masks) condensed so it terminates.
+    support_level, mutual_support_groups = support_levels(phrases, on_top_of)
+    for group in mutual_support_groups:
+        logger.warning(
+            f"Mutually-supporting objects (overlapping/ambiguous masks?): {group}; "
+            "they share a support level and later heuristics break the tie."
+        )
 
     for p in phrases:
         logger.info(f"Support level: {p} = {support_level[p]}")
@@ -659,7 +642,7 @@ def check_resume_frame_matches(out_dir: str, img_idx: int) -> None:
         raise RuntimeError(
             f"{out_dir} holds a decomposition of frame {previous}, but this run is built on "
             f"frame {img_idx}. Resuming would mix object crops from two viewpoints. Move or "
-            f"delete {out_dir} (and the s6-s13 outputs derived from it) and rerun, or pin "
+            f"delete {out_dir} (and the s6-s14 outputs derived from it) and rerun, or pin "
             f"s3_ground.img_idx={previous} to keep the existing decomposition."
         )
     if previous is None and infer_resume_state(out_dir)[0] > 0:
@@ -1964,15 +1947,13 @@ def main(cfg):
 
         merged_output = np.where(metric_depth == 0, deepcopy(output), metric_depth)
 
-        # Check pixels against original image to see if we segmented a valid image, and not an "imagined" object
-        # due to the inpainting process accidentally adding a spurious object. We enforce a minimum proportion of pixels
-        # to completely align with the original image
+        # Check pixels against the upsampled source image (the root of the iteration chain) to see
+        # if we segmented a valid object, and not an "imagined" one added by the inpainting process.
+        # We enforce a minimum proportion of pixels to align with that source. Cast to float first:
+        # uint8 subtraction wraps around and marks any brightened pixel as misaligned.
         mask_size = removal_mask.sum()
-        # removal_original_pixel_alignment = np.all(resized_padded_img == current_rgb, axis=-1)
-        # n_aligned_pixels = removal_original_pixel_alignment[removal_mask].sum()
-        # Both images are uint8; subtract as int16 so negative channel differences don't wrap to ~255.
         removal_original_pixel_alignment = np.linalg.norm(
-            resized_padded_img.astype(np.int16) - current_rgb.astype(np.int16), axis=-1) < 50
+            upsampled_obj_img_raw.astype(np.float32) - current_rgb.astype(np.float32), axis=-1) < 50
         n_aligned_pixels = removal_original_pixel_alignment[removal_mask].sum()
         valid_pixel_proportion = float(n_aligned_pixels / mask_size)
         is_valid_removed_obj = bool(valid_pixel_proportion > min_valid_pixel_prop)
