@@ -1,0 +1,3 @@
+weights=external-mount-only
+checkpoint=/models/sam3.pt
+runtime_download=false
