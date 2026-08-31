@@ -27,7 +27,8 @@ COPY patches/splatfacto_depth_loss.patch /tmp/splatfacto_depth_loss.patch
 RUN set -eux; \
     SP_DIR="$(python3 -c 'import nerfstudio, os; print(os.path.dirname(os.path.dirname(nerfstudio.__file__)))')"; \
     patch -p1 -d "${SP_DIR}" --forward < /tmp/splatfacto_depth_loss.patch; \
-    rm /tmp/splatfacto_depth_loss.patch
+    rm /tmp/splatfacto_depth_loss.patch; \
+    python3 -c "import inspect, torch, gsplat; from nerfstudio.models import splatfacto; assert 'NERFSTUDIO_DEPTH_LOSS' in inspect.getsource(splatfacto.SplatfactoModel); print('Gaussian stack OK:', torch.__version__, gsplat.__version__)"
 
 COPY docker/gaussian-trainer/train.py /opt/simfoundry/train_gaussian.py
 RUN python3 -m py_compile /opt/simfoundry/train_gaussian.py
