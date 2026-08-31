@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import open3d as o3d
 from PIL import Image
 from probreg import cpd, transformation
+from scipy.ndimage import binary_erosion
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 import trimesh
@@ -54,7 +56,7 @@ def load_rgb(path: Path) -> np.ndarray:
     return np.asarray(Image.open(path).convert("RGB"))
 
 
-def load_mask(path: Path | None, shape: tuple[int, int]) -> np.ndarray:
+def load_mask(path: Path | None, shape: tuple[int, int], *, erode: bool = True) -> np.ndarray:
     if path is None:
         return np.ones(shape, dtype=bool)
     mask = np.asarray(Image.open(path).convert("L"))
@@ -65,7 +67,194 @@ def load_mask(path: Path | None, shape: tuple[int, int]) -> np.ndarray:
                 resample=Image.Resampling.NEAREST,
             )
         )
-    return mask > 127
+    mask_bool = mask > 127
+    if erode:
+        mask_bool = binary_erosion(mask_bool, structure=np.ones((3, 3), dtype=bool))
+    return mask_bool
+
+
+def map_simfoundry_mask(
+    mask_path: Path,
+    source_canvas_path: Path,
+    target_shape: tuple[int, int],
+    *,
+    erode: bool = True,
+) -> np.ndarray:
+    """Map Stage-5's padded mask back into the canonical DA3 image geometry.
+
+    Stage 8 pads the DA3 RGB to Stage 5's source canvas aspect ratio, resizes the
+    Stage-5 mask into that padded canvas, then removes the padding. Reproducing that
+    mapping avoids aspect-ratio distortion when the capture is, e.g., 16:9 but Stage 5
+    used a 4:3 decomposition canvas.
+    """
+    mask = np.asarray(Image.open(mask_path).convert("L"))
+    canvas = Image.open(source_canvas_path)
+    canvas_w, canvas_h = canvas.size
+    target_ratio = canvas_w / canvas_h
+    h, w = target_shape
+    current_ratio = w / h
+
+    if np.isclose(current_ratio, target_ratio, rtol=0, atol=1e-6):
+        resized = np.asarray(Image.fromarray(mask).resize((w, h), Image.Resampling.NEAREST))
+    elif current_ratio > target_ratio:
+        padded_w = w
+        padded_h = max(h, int(round(w / target_ratio)))
+        mapped = np.asarray(
+            Image.fromarray(mask).resize((padded_w, padded_h), Image.Resampling.NEAREST)
+        )
+        y0 = max(0, (padded_h - h) // 2)
+        resized = mapped[y0:y0 + h, :w]
+    else:
+        padded_h = h
+        padded_w = max(w, int(round(h * target_ratio)))
+        mapped = np.asarray(
+            Image.fromarray(mask).resize((padded_w, padded_h), Image.Resampling.NEAREST)
+        )
+        x0 = max(0, (padded_w - w) // 2)
+        resized = mapped[:h, x0:x0 + w]
+
+    if resized.shape != (h, w):
+        resized = np.asarray(
+            Image.fromarray(resized).resize((w, h), Image.Resampling.NEAREST)
+        )
+    mask_bool = resized > 127
+    if erode:
+        mask_bool = binary_erosion(mask_bool, structure=np.ones((3, 3), dtype=bool))
+    return mask_bool
+
+
+def _selection_index_from_json(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    preferred = {"selected_idx", "selected_index", "img_idx", "image_idx", "frame_idx"}
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key in preferred:
+                if key in value and isinstance(value[key], (int, np.integer)):
+                    return int(value[key])
+            for nested in value.values():
+                found = walk(nested)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = walk(nested)
+                if found is not None:
+                    return found
+        return None
+
+    return walk(payload)
+
+
+def resolve_simfoundry_frame_index(scene_dir: Path, override: int | None) -> int:
+    if override is not None:
+        return override
+
+    selected = _selection_index_from_json(scene_dir / "s3_ground" / "frame_selection.json")
+    if selected is not None:
+        return selected
+
+    candidates = sorted((scene_dir / "s4_frame").glob("image_*_cam2world.npy"))
+    parsed: list[int] = []
+    for path in candidates:
+        match = re.match(r"image_(\d+)_cam2world\.npy$", path.name)
+        if match:
+            parsed.append(int(match.group(1)))
+    if len(parsed) == 1:
+        return parsed[0]
+    if not parsed:
+        raise FileNotFoundError(
+            f"Could not resolve canonical frame: no frame_selection.json index and no "
+            f"image_*_cam2world.npy under {scene_dir / 's4_frame'}"
+        )
+    raise ValueError(
+        f"Multiple canonical-frame artifacts found {parsed}; pass --frame-index explicitly."
+    )
+
+
+def resolve_simfoundry_mesh(scene_dir: Path, object_index: int, backend: str | None) -> Path:
+    mesh_root = scene_dir / "s7_mesh" / "textured_mesh"
+    if backend is not None:
+        candidate = mesh_root / backend / f"iter_{object_index}_mesh.glb"
+        if not candidate.is_file():
+            raise FileNotFoundError(candidate)
+        return candidate
+
+    candidates = sorted(mesh_root.glob(f"*/iter_{object_index}_mesh.glb"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise FileNotFoundError(
+            f"No generated mesh found for object {object_index} under {mesh_root}"
+        )
+    raise ValueError(
+        "Multiple mesh backends found for object "
+        f"{object_index}: {[p.parent.name for p in candidates]}; pass --mesh-backend."
+    )
+
+
+def load_simfoundry_scene_inputs(
+    scene_dir: Path,
+    object_index: int,
+    *,
+    frame_index: int | None,
+    mesh_backend: str | None,
+    erode_mask: bool,
+) -> dict[str, object]:
+    scene_dir = scene_dir.resolve()
+    idx = resolve_simfoundry_frame_index(scene_dir, frame_index)
+    npz_path = scene_dir / "s2_da" / "da" / "exports" / "npz" / "results.npz"
+    if not npz_path.is_file():
+        raise FileNotFoundError(npz_path)
+
+    with np.load(npz_path) as results:
+        for key in ("image", "depth", "intrinsics"):
+            if key not in results:
+                raise KeyError(f"{npz_path} does not contain {key!r}")
+        if not (0 <= idx < len(results["image"])):
+            raise IndexError(f"frame index {idx} is outside DA3 result length {len(results['image'])}")
+        rgb = np.asarray(results["image"][idx]).copy()
+        depth = np.asarray(results["depth"][idx], dtype=np.float32).copy()
+        K = np.asarray(results["intrinsics"][idx], dtype=np.float64).copy()
+
+    mask_path = scene_dir / "s5_scene" / "removal_mask" / f"iter_{object_index}.png"
+    canvas_path = scene_dir / "s5_scene" / "source_padded_resized.png"
+    if not mask_path.is_file():
+        raise FileNotFoundError(mask_path)
+    if not canvas_path.is_file():
+        raise FileNotFoundError(canvas_path)
+    mask = map_simfoundry_mask(
+        mask_path,
+        canvas_path,
+        depth.shape,
+        erode=erode_mask,
+    )
+
+    mesh_path = resolve_simfoundry_mesh(scene_dir, object_index, mesh_backend)
+    cam2world_path = scene_dir / "s4_frame" / f"image_{idx}_cam2world.npy"
+    if not cam2world_path.is_file():
+        raise FileNotFoundError(cam2world_path)
+    T_cam_world = load_matrix(cam2world_path, (4, 4))
+
+    return {
+        "rgb": rgb,
+        "depth": depth,
+        "K": K,
+        "mask": mask,
+        "mesh_path": mesh_path,
+        "T_cam_world": T_cam_world,
+        "frame_index": idx,
+        "object_index": object_index,
+        "npz_path": npz_path,
+        "mask_path": mask_path,
+        "cam2world_path": cam2world_path,
+    }
 
 
 def backproject(
@@ -226,20 +415,32 @@ def parse_args() -> argparse.Namespace:
             "mesh using the OBB-scale + multi-start CPD strategy used by SimFoundry Stage 8."
         )
     )
-    parser.add_argument("--rgb", type=Path, required=True)
-    parser.add_argument("--depth", type=Path, required=True)
-    parser.add_argument("--intrinsics", type=Path, required=True)
-    parser.add_argument("--mask", type=Path, default=None)
-    parser.add_argument("--mesh", type=Path, default=None, help="Optional generated GLB/OBJ/PLY mesh.")
-    parser.add_argument("--camera-to-world", type=Path, default=None)
+    source = parser.add_argument_group("input source")
+    source.add_argument(
+        "--simfoundry-scene-dir",
+        type=Path,
+        default=None,
+        help="Completed Data/<scene> directory. Auto-resolves DA3 RGB-D/K, Stage-5 mask, Stage-7 mesh, and cam2world.",
+    )
+    source.add_argument("--object-index", type=int, default=None, help="Stage-5/7 iter index; required with --simfoundry-scene-dir.")
+    source.add_argument("--frame-index", type=int, default=None, help="Override canonical frame index in SimFoundry mode.")
+    source.add_argument("--mesh-backend", default=None, help="Select s7_mesh/textured_mesh/<backend> in SimFoundry mode.")
+    source.add_argument("--rgb", type=Path, default=None)
+    source.add_argument("--depth", type=Path, default=None)
+    source.add_argument("--intrinsics", type=Path, default=None)
+    source.add_argument("--mask", type=Path, default=None)
+    source.add_argument("--mesh", type=Path, default=None, help="Generated GLB/OBJ/PLY mesh. Requires --mask in explicit-file mode.")
+    source.add_argument("--camera-to-world", type=Path, default=None)
+
     parser.add_argument("--output-dir", type=Path, default=Path("/output"))
-    parser.add_argument("--depth-scale", type=float, default=1.0, help="Multiply stored depth by this to get metres.")
+    parser.add_argument("--depth-scale", type=float, default=1.0, help="Explicit-file mode: multiply stored depth by this to get metres.")
     parser.add_argument("--min-depth", type=float, default=0.02)
     parser.add_argument("--max-depth", type=float, default=5.0)
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--mesh-points", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-scale-refine", action="store_true")
+    parser.add_argument("--no-mask-erode", action="store_true", help="Disable the Stage-8-style 3x3 object-mask erosion.")
     return parser.parse_args()
 
 
@@ -248,13 +449,70 @@ def main() -> int:
     if args.samples <= 0 or args.mesh_points < MIN_POINTS:
         raise ValueError("--samples must be >0 and --mesh-points must be >=10")
 
-    rgb = load_rgb(args.rgb)
-    depth = load_depth(args.depth, args.depth_scale)
+    provenance: dict[str, object]
+    mesh_path: Path | None
+    T_cam_world: np.ndarray | None
+
+    if args.simfoundry_scene_dir is not None:
+        if any(v is not None for v in (args.rgb, args.depth, args.intrinsics, args.mask, args.mesh, args.camera_to_world)):
+            raise ValueError("Do not mix --simfoundry-scene-dir with explicit --rgb/--depth/--mask/--mesh inputs.")
+        if args.object_index is None:
+            raise ValueError("--object-index is required with --simfoundry-scene-dir")
+        bundle = load_simfoundry_scene_inputs(
+            args.simfoundry_scene_dir,
+            args.object_index,
+            frame_index=args.frame_index,
+            mesh_backend=args.mesh_backend,
+            erode_mask=not args.no_mask_erode,
+        )
+        rgb = np.asarray(bundle["rgb"])
+        depth = np.asarray(bundle["depth"], dtype=np.float32)
+        K = np.asarray(bundle["K"], dtype=np.float64)
+        mask = np.asarray(bundle["mask"], dtype=bool)
+        mesh_path = Path(bundle["mesh_path"])
+        T_cam_world = np.asarray(bundle["T_cam_world"], dtype=np.float64)
+        provenance = {
+            "mode": "simfoundry-scene",
+            "scene_dir": str(args.simfoundry_scene_dir.resolve()),
+            "frame_index": int(bundle["frame_index"]),
+            "object_index": int(bundle["object_index"]),
+            "da3_npz": str(bundle["npz_path"]),
+            "mask": str(bundle["mask_path"]),
+            "mesh": str(mesh_path),
+            "camera_to_world": str(bundle["cam2world_path"]),
+        }
+    else:
+        missing = [name for name, value in (("--rgb", args.rgb), ("--depth", args.depth), ("--intrinsics", args.intrinsics)) if value is None]
+        if missing:
+            raise ValueError(f"Explicit-file mode requires {', '.join(missing)}")
+        if args.mesh is not None and args.mask is None:
+            raise ValueError("Object mesh registration requires --mask. Omit --mesh for a full-frame RGB-D point cloud.")
+
+        rgb = load_rgb(args.rgb)
+        depth = load_depth(args.depth, args.depth_scale)
+        if rgb.shape[:2] != depth.shape:
+            raise ValueError(f"RGB shape {rgb.shape[:2]} does not match depth {depth.shape}")
+        K = load_matrix(args.intrinsics, (3, 3))
+        mask = load_mask(args.mask, depth.shape, erode=not args.no_mask_erode)
+        mesh_path = args.mesh
+        T_cam_world = load_matrix(args.camera_to_world, (4, 4)) if args.camera_to_world is not None else None
+        provenance = {
+            "mode": "explicit-files",
+            "rgb": str(args.rgb.resolve()),
+            "depth": str(args.depth.resolve()),
+            "intrinsics": str(args.intrinsics.resolve()),
+            "mask": str(args.mask.resolve()) if args.mask is not None else None,
+            "mesh": str(args.mesh.resolve()) if args.mesh is not None else None,
+            "camera_to_world": str(args.camera_to_world.resolve()) if args.camera_to_world is not None else None,
+        }
+
     if rgb.shape[:2] != depth.shape:
         raise ValueError(f"RGB shape {rgb.shape[:2]} does not match depth {depth.shape}")
+    if K.shape != (3, 3):
+        raise ValueError(f"Intrinsics must be 3x3, got {K.shape}")
+    if mask.shape != depth.shape:
+        raise ValueError(f"Mask shape {mask.shape} does not match depth {depth.shape}")
 
-    K = load_matrix(args.intrinsics, (3, 3))
-    mask = load_mask(args.mask, depth.shape)
     points, pixels = backproject(
         depth,
         K,
@@ -280,21 +538,20 @@ def main() -> int:
         "camera_convention": "OpenCV: +x right, +y down, +z forward",
         "point_cloud_camera": str(camera_cloud_path),
         "num_points": len(cloud.points),
+        "input": provenance,
     }
 
-    T_cam_world = None
-    if args.camera_to_world is not None:
-        T_cam_world = load_matrix(args.camera_to_world, (4, 4))
+    if T_cam_world is not None:
         world_points = np.asarray(cloud.points) @ T_cam_world[:3, :3].T + T_cam_world[:3, 3]
         world_cloud = make_cloud(world_points, np.asarray(cloud.colors))
         world_cloud_path = out_dir / "object_point_cloud_world.ply"
         o3d.io.write_point_cloud(str(world_cloud_path), world_cloud)
         result["point_cloud_world"] = str(world_cloud_path)
 
-    if args.mesh is not None:
-        loaded = trimesh.load(args.mesh, force="mesh")
+    if mesh_path is not None:
+        loaded = trimesh.load(mesh_path, force="mesh")
         if not isinstance(loaded, trimesh.Trimesh) or len(loaded.vertices) < 4:
-            raise ValueError(f"Could not load a triangle mesh from {args.mesh}")
+            raise ValueError(f"Could not load a triangle mesh from {mesh_path}")
 
         fit = fit_mesh_to_partial_cloud(
             cloud,
