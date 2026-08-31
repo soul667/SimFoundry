@@ -4,7 +4,7 @@ This directory exposes two narrow services from the SimFoundry reconstruction st
 
 ## 1. Gaussian trainer
 
-Image: `ghcr.io/soul667/simfoundry-gaussian-trainer:latest`
+Image after merge to `main`: `ghcr.io/soul667/simfoundry-gaussian-trainer:latest`
 
 This image follows the current SimFoundry auto-background training stack:
 
@@ -44,7 +44,7 @@ Outputs:
 
 ## 2. RGB-D registration
 
-Image: `ghcr.io/soul667/simfoundry-rgbd-registration:latest`
+Image after merge to `main`: `ghcr.io/soul667/simfoundry-rgbd-registration:latest`
 
 This image extracts the geometry core of SimFoundry Stage 8:
 
@@ -102,8 +102,10 @@ Outputs:
 
 `.github/workflows/docker-images.yml` builds both Dockerfiles as a matrix.
 
-- Pull requests: build only, no registry push.
-- Push to `main`: build and push `latest` plus a full commit-SHA tag to GHCR.
+- Any branch push touching the Docker build inputs: build both images immediately.
+- Same-repository pull requests: the duplicate PR build job is skipped because the branch push already validates it.
+- Fork pull requests: build both images without registry push.
+- Push to `main`: build and additionally push `latest` plus a full commit-SHA tag to GHCR.
 - Manual `workflow_dispatch`: build only.
 
 The workflow uses the repository `GITHUB_TOKEN`; no additional registry secret is required as long as GitHub Actions has package write permission for the repository.
