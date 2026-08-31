@@ -7,7 +7,6 @@ on:
       - "patches/splatfacto_depth_loss.patch"
       - ".github/workflows/docker-images.yml"
   push:
-    branches: [main]
     paths:
       - "docker/**"
       - "patches/splatfacto_depth_loss.patch"
@@ -20,6 +19,9 @@ permissions:
 
 jobs:
   build:
+    # Same-repository PRs are already validated by the branch push event.
+    # Fork PRs have no push event in this repository, so keep PR validation for them.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
