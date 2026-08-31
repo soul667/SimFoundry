@@ -20,7 +20,9 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     python -c "import numpy, open3d, probreg, scipy, trimesh; print('Registration stack OK:', numpy.__version__, open3d.__version__)"
 
 COPY docker/rgbd-registration/register.py /opt/simfoundry/register_rgbd.py
-RUN python -m py_compile /opt/simfoundry/register_rgbd.py
+COPY docker/rgbd-registration/smoke_test.py /opt/simfoundry/smoke_test.py
+RUN python -m py_compile /opt/simfoundry/register_rgbd.py /opt/simfoundry/smoke_test.py && \
+    python /opt/simfoundry/smoke_test.py
 
 ENV PYTHONUNBUFFERED=1
 WORKDIR /workspace
