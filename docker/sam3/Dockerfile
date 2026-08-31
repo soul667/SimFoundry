@@ -35,10 +35,11 @@ RUN python -m pip install --upgrade pip \
         --index-url "${TORCH_INDEX_URL}"
 
 COPY --from=sam3-source /src/sam3 /opt/sam3
-# SAM3's pinned source imports einops in sam3/sam/rope.py but does not declare it
-# in the base project dependencies, so install it explicitly for image inference.
+# The pinned SAM3 source has inference-time imports that are not all declared
+# by its base pyproject dependencies. SimFoundry's own installer also adds
+# decord + pycocotools after installing SAM3; einops is imported by sam/rope.py.
 RUN python -m pip install -e /opt/sam3 \
-    && python -m pip install "einops>=0.8,<0.9" \
+    && python -m pip install "einops>=0.8,<0.9" pycocotools decord \
     && mkdir -p /licenses \
     && cp /opt/sam3/LICENSE /licenses/SAM3-LICENSE.txt
 
