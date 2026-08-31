@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""Standalone SAM3 image segmentation CLI for SimFoundry workflows.
+
+The container intentionally does not bundle SAM3 checkpoints. By default the
+upstream SAM3 builder downloads facebook/sam3 from Hugging Face at runtime,
+using HF_TOKEN / the persistent Hugging Face cache mounted under /models.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+
+import numpy as np
+import torch
+from PIL import Image
+from sam3.model.sam3_image_processor import Sam3Processor
+from sam3.model_builder import build_sam3_image_model
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run SAM3 text-prompt instance segmentation on one image."
+    )
+    parser.add_argument("--image", type=Path, required=True, help="Input RGB image.")
+    parser.add_argument(
+        "--prompt",
+        action="append",
+        default=[],
+        help="Text prompt. Repeat the flag to segment multiple concepts with one model/image load.",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        default=None,
+        help="Optional UTF-8 file with one text prompt per non-empty line.",
+    )
+    parser.add_argument("--output-dir", type=Path, default=Path("/output"))
+    parser.add_argument(
+        "--mask-out",
+        type=Path,
+        default=None,
+        help="For exactly one prompt, also write its selected mask to this exact path (e.g. iter_0.png).",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="Optional local sam3.pt. If omitted, upstream SAM3 downloads facebook/sam3 from Hugging Face.",
+    )
+    parser.add_argument("--device", default="cuda", help="Torch device, usually cuda or cuda:0.")
+    parser.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.5,
+        help="SAM3 detector confidence threshold.",
+    )
+    parser.add_argument(
+        "--selection",
+        choices=("top-score", "largest", "union"),
+        default="top-score",
+        help="How to produce primary_mask.png when a prompt matches multiple instances.",
+    )
+    parser.add_argument(
+        "--crop-padding",
+        type=float,
+        default=0.05,
+        help="Fraction of the selected-mask max bbox dimension added around crop_rgba.png.",
+    )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Write empty outputs instead of returning an error when a prompt has no matches.",
+    )
+    return parser.parse_args()
+
+
+def read_prompts(args: argparse.Namespace) -> list[str]:
+    prompts = [p.strip() for p in args.prompt if p.strip()]
+    if args.prompt_file is not None:
+        prompts.extend(
+            line.strip()
+            for line in args.prompt_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    if not prompts:
+        raise ValueError("Provide at least one --prompt or --prompt-file.")
+    return prompts
+
+
+def slugify(value: str, max_len: int = 48) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()).strip("_.-")
+    return (slug or "prompt")[:max_len]
+
+
+def to_numpy(value) -> np.ndarray:
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def normalize_masks(value, image_shape: tuple[int, int]) -> np.ndarray:
+    masks = to_numpy(value)
+    if masks.ndim == 4 and masks.shape[1] == 1:
+        masks = masks[:, 0]
+    elif masks.ndim == 2:
+        masks = masks[None, ...]
+    if masks.ndim != 3:
+        raise ValueError(f"Unexpected SAM3 masks shape: {masks.shape}")
+    if tuple(masks.shape[1:]) != image_shape:
+        raise ValueError(
+            f"SAM3 returned mask shape {masks.shape[1:]}, expected {image_shape}."
+        )
+    return masks.astype(bool, copy=False)
+
+
+def normalize_vector(value, length: int, name: str) -> np.ndarray:
+    array = to_numpy(value).reshape(-1)
+    if len(array) != length:
+        raise ValueError(f"SAM3 {name} length {len(array)} != number of masks {length}")
+    return array
+
+
+def normalize_boxes(value, length: int) -> np.ndarray:
+    boxes = to_numpy(value).reshape(-1, 4)
+    if len(boxes) != length:
+        raise ValueError(f"SAM3 boxes length {len(boxes)} != number of masks {length}")
+    return boxes
+
+
+def save_mask(mask: np.ndarray, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(path)
+
+
+def selected_mask(masks: np.ndarray, scores: np.ndarray, mode: str) -> tuple[np.ndarray, int | None]:
+    if len(masks) == 0:
+        raise ValueError("selected_mask requires at least one mask")
+    if mode == "union":
+        return np.any(masks, axis=0), None
+    if mode == "largest":
+        index = int(np.argmax(masks.reshape(len(masks), -1).sum(axis=1)))
+    else:
+        index = int(np.argmax(scores))
+    return masks[index], index
+
+
+def save_rgba_products(
+    rgb: Image.Image,
+    mask: np.ndarray,
+    output_dir: Path,
+    *,
+    crop_padding: float,
+) -> dict[str, str | None]:
+    rgba = np.asarray(rgb.convert("RGBA")).copy()
+    rgba[..., 3] = mask.astype(np.uint8) * 255
+    full_path = output_dir / "cutout_rgba.png"
+    Image.fromarray(rgba, mode="RGBA").save(full_path)
+
+    ys, xs = np.nonzero(mask)
+    crop_path: Path | None = None
+    if len(xs) > 0:
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        pad = int(round(max(x1 - x0, y1 - y0) * crop_padding))
+        x0 = max(0, x0 - pad)
+        y0 = max(0, y0 - pad)
+        x1 = min(mask.shape[1], x1 + pad)
+        y1 = min(mask.shape[0], y1 + pad)
+        crop_path = output_dir / "crop_rgba.png"
+        Image.fromarray(rgba[y0:y1, x0:x1], mode="RGBA").save(crop_path)
+
+    return {
+        "cutout_rgba": str(full_path),
+        "crop_rgba": str(crop_path) if crop_path is not None else None,
+    }
+
+
+def run_prompt(
+    *,
+    processor: Sam3Processor,
+    state: dict,
+    prompt: str,
+    rgb: Image.Image,
+    output_dir: Path,
+    selection: str,
+    crop_padding: float,
+    allow_empty: bool,
+) -> dict[str, object]:
+    output = processor.set_text_prompt(state=state, prompt=prompt)
+    masks = normalize_masks(output["masks"], (rgb.height, rgb.width))
+    scores = normalize_vector(output["scores"], len(masks), "scores").astype(float)
+    boxes = normalize_boxes(output["boxes"], len(masks)).astype(float)
+
+    order = np.argsort(-scores)
+    masks = masks[order]
+    scores = scores[order]
+    boxes = boxes[order]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    instances_dir = output_dir / "instances"
+    instances_dir.mkdir(parents=True, exist_ok=True)
+
+    instances: list[dict[str, object]] = []
+    for index, (mask, score, box) in enumerate(zip(masks, scores, boxes)):
+        instance_path = instances_dir / f"{index:03d}.png"
+        save_mask(mask, instance_path)
+        instances.append(
+            {
+                "index": index,
+                "score": float(score),
+                "box_xyxy": [float(v) for v in box],
+                "area_pixels": int(mask.sum()),
+                "mask": str(instance_path),
+            }
+        )
+
+    if len(masks) == 0:
+        if not allow_empty:
+            raise RuntimeError(f"SAM3 found no instances for prompt: {prompt!r}")
+        primary = np.zeros((rgb.height, rgb.width), dtype=bool)
+        selected_index = None
+    else:
+        primary, selected_index = selected_mask(masks, scores, selection)
+
+    primary_path = output_dir / "primary_mask.png"
+    save_mask(primary, primary_path)
+    rgba_paths = save_rgba_products(
+        rgb,
+        primary,
+        output_dir,
+        crop_padding=crop_padding,
+    )
+
+    result: dict[str, object] = {
+        "prompt": prompt,
+        "matched_instances": len(instances),
+        "selection": selection,
+        "selected_instance_index": selected_index,
+        "primary_mask": str(primary_path),
+        **rgba_paths,
+        "instances": instances,
+    }
+    (output_dir / "metadata.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return result
+
+
+def main() -> int:
+    args = parse_args()
+    prompts = read_prompts(args)
+
+    if not args.image.is_file():
+        raise FileNotFoundError(args.image)
+    if args.prompt_file is not None and not args.prompt_file.is_file():
+        raise FileNotFoundError(args.prompt_file)
+    if args.checkpoint is not None and not args.checkpoint.is_file():
+        raise FileNotFoundError(args.checkpoint)
+    if args.mask_out is not None and len(prompts) != 1:
+        raise ValueError("--mask-out is only supported when exactly one prompt is supplied.")
+    if not 0.0 <= args.confidence_threshold <= 1.0:
+        raise ValueError("--confidence-threshold must be in [0, 1].")
+    if args.crop_padding < 0:
+        raise ValueError("--crop-padding must be >= 0.")
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA was requested but torch.cuda.is_available() is false. Run the container with --gpus all, "
+            "or explicitly use --device cpu (slow)."
+        )
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    rgb = Image.open(args.image).convert("RGB")
+
+    checkpoint_path = str(args.checkpoint) if args.checkpoint is not None else None
+    model = build_sam3_image_model(
+        device=args.device,
+        checkpoint_path=checkpoint_path,
+        load_from_HF=args.checkpoint is None,
+    )
+    processor = Sam3Processor(
+        model,
+        device=args.device,
+        confidence_threshold=args.confidence_threshold,
+    )
+
+    # Compute image features once, then reuse them for every text prompt.
+    state = processor.set_image(rgb)
+    results: list[dict[str, object]] = []
+    for index, prompt in enumerate(prompts):
+        if index > 0:
+            processor.reset_all_prompts(state)
+        prompt_dir = args.output_dir / f"prompt_{index:02d}_{slugify(prompt)}"
+        result = run_prompt(
+            processor=processor,
+            state=state,
+            prompt=prompt,
+            rgb=rgb,
+            output_dir=prompt_dir,
+            selection=args.selection,
+            crop_padding=args.crop_padding,
+            allow_empty=args.allow_empty,
+        )
+        results.append(result)
+
+    if args.mask_out is not None:
+        source = Path(str(results[0]["primary_mask"]))
+        args.mask_out.parent.mkdir(parents=True, exist_ok=True)
+        args.mask_out.write_bytes(source.read_bytes())
+        results[0]["mask_out"] = str(args.mask_out)
+
+    manifest = {
+        "input_image": str(args.image),
+        "image_size": [rgb.width, rgb.height],
+        "device": args.device,
+        "confidence_threshold": args.confidence_threshold,
+        "checkpoint": str(args.checkpoint) if args.checkpoint is not None else "facebook/sam3 via Hugging Face",
+        "results": results,
+    }
+    manifest_path = args.output_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(json.dumps({"manifest": str(manifest_path), "prompts": len(prompts)}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
