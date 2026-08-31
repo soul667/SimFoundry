@@ -36,10 +36,11 @@ RUN python -m pip install --upgrade pip \
 
 COPY --from=sam3-source /src/sam3 /opt/sam3
 # The pinned SAM3 source has inference-time imports that are not all declared
-# by its base pyproject dependencies. SimFoundry's own installer also adds
-# decord + pycocotools after installing SAM3; einops is imported by sam/rope.py.
+# by its base pyproject dependencies. SimFoundry's installer separately adds
+# decord + pycocotools; model_builder also imports video code that needs psutil,
+# and sam/rope.py needs einops even for the image-model import path.
 RUN python -m pip install -e /opt/sam3 \
-    && python -m pip install "einops>=0.8,<0.9" pycocotools decord \
+    && python -m pip install "einops>=0.8,<0.9" pycocotools decord psutil \
     && mkdir -p /licenses \
     && cp /opt/sam3/LICENSE /licenses/SAM3-LICENSE.txt
 
