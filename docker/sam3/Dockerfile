@@ -22,8 +22,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/models/huggingface \
-    HF_HUB_CACHE=/models/huggingface/hub
+    HF_HUB_OFFLINE=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libgl1 libglib2.0-0 \
@@ -42,9 +41,10 @@ RUN python -m pip install -e /opt/sam3 \
 
 COPY docker/sam3/segment.py /opt/simfoundry/segment_sam3.py
 RUN python -m py_compile /opt/simfoundry/segment_sam3.py \
-    && python -c "import torch, sam3; from sam3.model_builder import build_sam3_image_model; from sam3.model.sam3_image_processor import Sam3Processor; print('SAM3 runtime import OK:', torch.__version__)"
+    && python -c "import torch, sam3; from sam3.model_builder import build_sam3_image_model; from sam3.model.sam3_image_processor import Sam3Processor; print('SAM3 runtime import OK:', torch.__version__)" \
+    && python /opt/simfoundry/segment_sam3.py --help >/dev/null
 
 WORKDIR /workspace
-VOLUME ["/models"]
+VOLUME ["/models", "/output"]
 ENTRYPOINT ["python", "/opt/simfoundry/segment_sam3.py"]
 CMD ["--help"]
