@@ -1,0 +1,1 @@
+HF private repo -> host hf download -> /srv/simfoundry-models/sam3.pt -> read-only Docker mount /models/sam3.pt
