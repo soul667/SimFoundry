@@ -40,9 +40,10 @@ RUN python -m pip install -e /opt/sam3 \
     && cp /opt/sam3/LICENSE /licenses/SAM3-LICENSE.txt
 
 COPY docker/sam3/segment.py /opt/simfoundry/segment_sam3.py
-RUN python -m py_compile /opt/simfoundry/segment_sam3.py \
+COPY docker/sam3/smoke_test.py /opt/simfoundry/smoke_test_sam3.py
+RUN python -m py_compile /opt/simfoundry/segment_sam3.py /opt/simfoundry/smoke_test_sam3.py \
     && python -c "import torch, sam3; from sam3.model_builder import build_sam3_image_model; from sam3.model.sam3_image_processor import Sam3Processor; print('SAM3 runtime import OK:', torch.__version__)" \
-    && python /opt/simfoundry/segment_sam3.py --help >/dev/null
+    && python /opt/simfoundry/smoke_test_sam3.py
 
 WORKDIR /workspace
 VOLUME ["/models", "/output"]
